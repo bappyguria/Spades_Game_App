@@ -74,7 +74,6 @@ class WaitingRoomScreen extends StatelessWidget {
           final bool isFull = players.length == maxPlayers;
 
           if (status == 'dealing') {
-            // ✅ Landscape Mode Force
             SystemChrome.setPreferredOrientations([
               DeviceOrientation.landscapeLeft,
               DeviceOrientation.landscapeRight,
@@ -95,7 +94,8 @@ class WaitingRoomScreen extends StatelessWidget {
           }
 
           return SafeArea(
-            child: Padding(
+            child: SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
               child: Column(
                 children: [
@@ -103,30 +103,31 @@ class WaitingRoomScreen extends StatelessWidget {
                   const SizedBox(height: 20),
                   _buildPlayerCountRow(players.length),
                   const SizedBox(height: 16),
-                  Expanded(
-                    child: players.isEmpty
-                        ? _buildEmptyState()
-                        : ListView.separated(
-                            physics: const BouncingScrollPhysics(),
-                            itemCount: players.length,
-                            separatorBuilder: (_, __) =>
-                                const SizedBox(height: 10),
-                            itemBuilder: (_, index) {
-                              final player = players[index];
-                              final bool host = player['uid'] == hostId;
-                              return _PlayerTile(
-                                index: index,
-                                name: player['name']?.toString() ?? 'Player',
-                                isHost: host,
-                              );
-                            },
-                          ),
-                  ),
+                  if (players.isEmpty)
+                    _buildEmptyState()
+                  else
+                    ListView.separated(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: players.length,
+                      separatorBuilder: (_, __) =>
+                          const SizedBox(height: 10),
+                      itemBuilder: (_, index) {
+                        final player = players[index];
+                        final bool host = player['uid'] == hostId;
+                        return _PlayerTile(
+                          index: index,
+                          name: player['name']?.toString() ?? 'Player',
+                          isHost: host,
+                        );
+                      },
+                    ),
                   const SizedBox(height: 12),
                   if (isHost)
                     _buildHostButton(context, isFull, players.length)
                   else
                     _buildWaitingBanner(players.length),
+                  const SizedBox(height: 20),
                 ],
               ),
             ),
@@ -229,17 +230,20 @@ class WaitingRoomScreen extends StatelessWidget {
   // -- Empty state ------------------------------------------------------
 
   Widget _buildEmptyState() {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.hourglass_empty_rounded, color: textMuted, size: 32),
-          const SizedBox(height: 10),
-          Text(
-            'Waiting for players to join…',
-            style: TextStyle(color: textMuted, fontSize: 13.5),
-          ),
-        ],
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 30),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.hourglass_empty_rounded, color: textMuted, size: 32),
+            const SizedBox(height: 10),
+            Text(
+              'Waiting for players to join…',
+              style: TextStyle(color: textMuted, fontSize: 13.5),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -316,7 +320,6 @@ class WaitingRoomScreen extends StatelessWidget {
                     .collection('rooms')
                     .doc(roomId)
                     .update({
-                      // ✅ ১ম রাউন্ডে Dealer = Player 1
                       'status': 'dealing',
                       'dealerIndex': 0,
                       'roundNumber': 1,
