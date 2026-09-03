@@ -1,0 +1,49 @@
+{
+  "project_info": {
+    "project_number": "1038550523195",
+    "firebase_url": "https://spadesgame-1d6ba-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "spadesgame-1d6ba",
+    "storage_bucket": "spadesgame-1d6ba.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1038550523195:android:921a0e863ed97c9e67ab1e",
+        "android_client_info": {
+          "package_name": "com.example.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCM3-wCdq3ph3cJ49PppBaPKYXrETO1DW4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1038550523195:android:00e5a5fa7f48633267ab1e",
+        "android_client_info": {
+          "package_name": "com.example.spades_game"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCM3-wCdq3ph3cJ49PppBaPKYXrETO1DW4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
