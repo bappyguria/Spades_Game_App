@@ -15,11 +15,12 @@ class TurnService {
 
     final data = roomDoc.data() ?? {};
     final players = _normalizePlayers(data['players']);
+    final status = data['status']?.toString() ?? '';
     final bids = Map<String, dynamic>.from(data['bids'] ?? {});
     final bidOrder = List<String>.from(data['bidOrder'] ?? []);
     final currentBidTurn = data['bidTurn']?.toString() ?? '';
 
-    if (currentBidTurn != uid) {
+    if (status != 'bidding' || currentBidTurn != uid) {
       throw Exception('It is not your turn to bid!');
     }
 
@@ -52,6 +53,7 @@ class TurnService {
 
     final data = roomDoc.data() ?? {};
     final players = _normalizePlayers(data['players']);
+    final status = data['status']?.toString() ?? '';
     final currentTurn = data['currentTurn']?.toString() ?? '';
     final gameOver = data['gameOver'] == true;
     final bids = Map<String, dynamic>.from(data['bids'] ?? {});
@@ -61,7 +63,10 @@ class TurnService {
           .map((entry) => Map<String, dynamic>.from(entry)),
     );
 
-    if (currentTurn != uid || gameOver || bids.length < players.length) {
+    if (status != 'playing' ||
+        currentTurn != uid ||
+        gameOver ||
+        bids.length < players.length) {
       return;
     }
 
@@ -299,6 +304,60 @@ class TurnService {
       playerScores: Map<String, int>.from(summary['playerScores'] ?? {}),
       round: summary['roundNumber'] ?? 1,
       firstPlayerUid: firstPlayerUid,
+      dealerIndex: newDealerIndex,
+      bidOrder: newBidOrder,
+    );
+  }
+
+  Future<void> startNextRoundAfterSuitCheck({
+    required String roomId,
+    required String uid,
+    required List<Map<String, dynamic>> players,
+  }) async {
+    final firestore = FirebaseFirestore.instance;
+    final roomRef = firestore.collection('rooms').doc(roomId);
+    final roomDoc = await roomRef.get();
+    if (!roomDoc.exists) return;
+
+    final data = roomDoc.data() ?? {};
+    final missingPlayers = (data['missingSpadePlayers'] as List<dynamic>? ?? [])
+        .map((entry) => entry.toString())
+        .toList();
+    if (data['status'] != 'suit_check' || !missingPlayers.contains(uid)) {
+      return;
+    }
+
+    final claimed = await firestore.runTransaction<bool>((transaction) async {
+      final currentRoom = await transaction.get(roomRef);
+      final currentData = currentRoom.data() ?? {};
+      if (currentData['status'] != 'suit_check') return false;
+      transaction.update(roomRef, {'status': 'redealing'});
+      return true;
+    });
+    if (!claimed) return;
+
+    final seatingOrder = (data['seatingOrder'] as List<dynamic>? ?? [])
+        .map((entry) => entry.toString())
+        .toList();
+    if (seatingOrder.isEmpty) return;
+
+    final currentDealerIndex =
+        (data['currentDealerIndex'] as num?)?.toInt() ?? 0;
+    final newDealerIndex = (currentDealerIndex + 1) % seatingOrder.length;
+    final firstPlayerIndex = (newDealerIndex + 1) % seatingOrder.length;
+    final newBidOrder = <String>[];
+    for (int index = 0; index < seatingOrder.length; index++) {
+      newBidOrder.add(
+        seatingOrder[(newDealerIndex + 1 + index) % seatingOrder.length],
+      );
+    }
+
+    await GameService.distributeCards(
+      roomId,
+      players,
+      playerScores: Map<String, int>.from(data['playerScores'] ?? {}),
+      round: ((data['round'] as num?)?.toInt() ?? 1) + 1,
+      firstPlayerUid: seatingOrder[firstPlayerIndex],
       dealerIndex: newDealerIndex,
       bidOrder: newBidOrder,
     );

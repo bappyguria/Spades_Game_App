@@ -219,6 +219,7 @@ class _GameScreenState extends State<GameScreen> {
   bool _isProcessingBid = false;
   bool _isPlayingCard = false;
   bool _isReportingMissingHeart = false;
+  bool _isReportingMissingSuit = false;
   String _lastRoomMessageId = '';
   BuildContext? _bidDialogContext;
   BuildContext? _summaryDialogContext;
@@ -266,13 +267,20 @@ class _GameScreenState extends State<GameScreen> {
             final players = _normalizePlayers(data['players']);
             final hands = Map<String, dynamic>.from(data['hands'] ?? {});
             final myCards = _normalizeCards(hands[uid]);
-            final hasHeartCard = myCards.any(
-              (card) => card['suit']?.toString() == '♥',
+            const nonSpadeSuits = ['♣', '♦', '♥'];
+            final missingSuit = nonSpadeSuits.firstWhere(
+              (suit) =>
+                  !myCards.any((card) => card['suit']?.toString() == suit),
+              orElse: () => '',
             );
             final sortedCards = List<Map<String, dynamic>>.from(myCards)
               ..sort(_compareCards);
             final currentTurn = data['currentTurn']?.toString() ?? '';
             final status = data['status']?.toString() ?? '';
+            final missingSpadePlayers =
+                (data['missingSpadePlayers'] as List<dynamic>? ?? [])
+                    .map((entry) => entry.toString())
+                    .toList();
             final tableCards = _normalizeTableCards(data['tableCards']);
             final bids = Map<String, dynamic>.from(data['bids'] ?? {});
             final tricks = Map<String, dynamic>.from(data['tricks'] ?? {});
@@ -289,6 +297,7 @@ class _GameScreenState extends State<GameScreen> {
                 .map((e) => e.toString())
                 .toList();
             final isMyBidTurn =
+                status == 'bidding' &&
                 bidTurn == uid &&
                 !hasSubmittedBid &&
                 !gameOver &&
@@ -423,7 +432,7 @@ class _GameScreenState extends State<GameScreen> {
                 // Me (Bottom) - সবচেয়ে নিচে
                 Positioned(
                   bottom: isSmallScreen ? 8 : 30,
-                  left: isSmallScreen ? 8 : 100,
+                  left: isSmallScreen ? 8 : 20,
                   child: _PlayerCornerCard(
                     player: players.isNotEmpty ? players.first : null,
                     name: 'You',
@@ -494,7 +503,9 @@ class _GameScreenState extends State<GameScreen> {
                   ),
                 ),
 
-                if (!hasHeartCard && !gameOver && status == 'bidding')
+                if (status == 'suit_check' &&
+                    missingSpadePlayers.contains(uid) &&
+                    !gameOver)
                   Positioned(
                     top: isSmallScreen ? 42 : 70,
                     left: 0,
@@ -503,12 +514,40 @@ class _GameScreenState extends State<GameScreen> {
                       child: ElevatedButton.icon(
                         onPressed: _isReportingMissingHeart
                             ? null
-                            : () => _reportMissingHeart(players),
-                        icon: const Icon(Icons.favorite_border, size: 16),
+                            : () => _startNextRoundAfterSuitCheck(players),
+                        icon: const Icon(Icons.refresh, size: 16),
                         label: Text(
                           _isReportingMissingHeart
                               ? 'পাঠানো হচ্ছে...'
-                              : "I don't have 1 card.",
+                              : 'NEXT ROUND',
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _C.red,
+                          foregroundColor: _C.white,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                if (status == 'bidding' && missingSuit.isNotEmpty && !gameOver)
+                  Positioned(
+                    top: isSmallScreen ? 42 : 150,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: ElevatedButton.icon(
+                        onPressed: _isReportingMissingSuit
+                            ? null
+                            : () => _reportMissingSuit(players, missingSuit),
+                        icon: const Icon(Icons.report_problem, size: 16),
+                        label: Text(
+                          _isReportingMissingSuit
+                              ? 'পাঠানো হচ্ছে...'
+                              : 'আমার কাছে $missingSuit কার্ড নেই',
                         ),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: _C.red,
@@ -711,8 +750,36 @@ class _GameScreenState extends State<GameScreen> {
     }
   }
 
-  Future<void> _reportMissingHeart(List<Map<String, dynamic>> players) async {
+  Future<void> _startNextRoundAfterSuitCheck(
+    List<Map<String, dynamic>> players,
+  ) async {
     if (_isReportingMissingHeart) return;
+
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (uid.isEmpty) return;
+
+    setState(() => _isReportingMissingHeart = true);
+    try {
+      await _turnService.startNextRoundAfterSuitCheck(
+        roomId: widget.roomId,
+        uid: uid,
+        players: players,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString()), backgroundColor: _C.red),
+      );
+    } finally {
+      if (mounted) setState(() => _isReportingMissingHeart = false);
+    }
+  }
+
+  Future<void> _reportMissingSuit(
+    List<Map<String, dynamic>> players,
+    String suit,
+  ) async {
+    if (_isReportingMissingSuit) return;
 
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     if (uid.isEmpty) return;
@@ -723,7 +790,7 @@ class _GameScreenState extends State<GameScreen> {
     );
     final playerName = player['name']?.toString() ?? 'A player';
 
-    setState(() => _isReportingMissingHeart = true);
+    setState(() => _isReportingMissingSuit = true);
     try {
       await FirebaseFirestore.instance
           .collection('rooms')
@@ -731,7 +798,7 @@ class _GameScreenState extends State<GameScreen> {
           .update({
             'roomMessage': {
               'id': DateTime.now().microsecondsSinceEpoch.toString(),
-              'text': '$playerName says: I don\'t have 1 card.',
+              'text': '$playerName এর কাছে কার্ড নেই।',
               'senderUid': uid,
             },
           });
@@ -741,7 +808,7 @@ class _GameScreenState extends State<GameScreen> {
         SnackBar(content: Text(e.toString()), backgroundColor: _C.red),
       );
     } finally {
-      if (mounted) setState(() => _isReportingMissingHeart = false);
+      if (mounted) setState(() => _isReportingMissingSuit = false);
     }
   }
 
@@ -1357,13 +1424,15 @@ class _MyHand extends StatelessWidget {
   Widget build(BuildContext context) {
     if (cards.isEmpty) return const SizedBox(height: 40);
 
-    final double cardW = isSmallScreen ? 48.0 : 60.0;
-    final double cardH = isSmallScreen ? 64.0 : 80.0;
-    final double fontSize = isSmallScreen ? 10.0 : 13.0;
-    final double suitSize = isSmallScreen ? 14.0 : 18.0;
-    final double bigSuitSize = isSmallScreen ? 32.0 : 42.0;
+    // ✅ কার্ডের সাইজ বড় করুন
+    final double cardW = isSmallScreen ? 56.0 : 80.0;
+    final double cardH = isSmallScreen ? 72.0 : 100.0;
+    final double fontSize = isSmallScreen ? 12.0 : 16.0;
+    final double suitSize = isSmallScreen ? 16.0 : 22.0;
+    final double bigSuitSize = isSmallScreen ? 36.0 : 48.0;
 
-    final double visibleHeight = isSmallScreen ? 32.0 : 40.0;
+    // ✅ কার্ডের স্পেস বাড়ান
+    final double visibleHeight = isSmallScreen ? 36.0 : 50.0;
 
     return SizedBox(
       height: visibleHeight,
@@ -1372,8 +1441,8 @@ class _MyHand extends StatelessWidget {
         builder: (ctx, constraints) {
           final spacing = cards.length > 1
               ? ((constraints.maxWidth * .7) / (cards.length - 1)).clamp(
-                  isSmallScreen ? 8.0 : 10.0,
-                  isSmallScreen ? 20.0 : 28.0,
+                  isSmallScreen ? 10.0 : 14.0,
+                  isSmallScreen ? 24.0 : 46.0,
                 )
               : 0.0;
           final handWidth = cardW + ((cards.length - 1) * spacing);
@@ -1391,7 +1460,7 @@ class _MyHand extends StatelessWidget {
 
               return Positioned(
                 left: startLeft + (i * spacing),
-                bottom: isSmallScreen ? 2.0 : 4.0,
+                bottom: isSmallScreen ? 2.0 : -15,
                 child: GestureDetector(
                   // ✅ Behavior: HitTestBehavior.opaque - পুরো কার্ডের উপর ক্লিক কাজ করবে
                   behavior: HitTestBehavior.opaque,
@@ -1405,25 +1474,25 @@ class _MyHand extends StatelessWidget {
                     decoration: BoxDecoration(
                       color: _C.white,
                       borderRadius: BorderRadius.circular(
-                        isSmallScreen ? 5.0 : 6.0,
+                        isSmallScreen ? 6.0 : 8.0,
                       ),
                       border: Border.all(
                         color: isMyTurn ? _C.goldDark : Colors.grey,
-                        width: isMyTurn ? 1.5 : 1.0,
+                        width: isMyTurn ? 2.0 : 1.0,
                       ),
                       boxShadow: [
                         BoxShadow(
                           color: Colors.black38,
-                          blurRadius: 4.0,
-                          offset: const Offset(0, 2),
+                          blurRadius: 6.0,
+                          offset: const Offset(0, 3),
                         ),
                       ],
                     ),
                     child: Stack(
                       children: [
                         Positioned(
-                          top: 2,
-                          left: 3,
+                          top: 3,
+                          left: 4,
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
@@ -1448,8 +1517,8 @@ class _MyHand extends StatelessWidget {
                           ),
                         ),
                         Positioned(
-                          bottom: 2,
-                          right: 3,
+                          bottom: 3,
+                          right: 4,
                           child: RotatedBox(
                             quarterTurns: 2,
                             child: Column(
@@ -1497,6 +1566,7 @@ class _MyHand extends StatelessWidget {
     );
   }
 }
+
 
 // ── Flying Card Overlay (Card Play Animation) ─────────────────────────────────
 class _FlyingCardOverlay extends StatefulWidget {

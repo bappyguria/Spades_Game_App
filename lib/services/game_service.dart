@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+
 import 'card_service.dart';
 
 class GameService {
@@ -15,13 +16,13 @@ class GameService {
     List<String>? bidOrder,
   }) async {
     final firestore = FirebaseFirestore.instance;
-    
+
     // ✅ Always read latest players list from Firebase to ensure consistent order
     final roomDoc = await firestore.collection('rooms').doc(roomId).get();
     final roomData = roomDoc.data() ?? {};
-    
+
     final List<dynamic> firebasePlayers = roomData['players'] ?? [];
-    
+
     final normalizedPlayers = firebasePlayers
         .whereType<Map>()
         .map((entry) => Map<String, dynamic>.from(entry))
@@ -31,13 +32,19 @@ class GameService {
     debugPrint('   Round: $round');
     debugPrint('   Players from Firebase:');
     for (int i = 0; i < normalizedPlayers.length; i++) {
-      debugPrint('     [$i] ${normalizedPlayers[i]['uid']} - ${normalizedPlayers[i]['name']}');
+      debugPrint(
+        '     [$i] ${normalizedPlayers[i]['uid']} - ${normalizedPlayers[i]['name']}',
+      );
     }
 
     final deck = CardService.shuffleDeck();
     final hands = <String, dynamic>{};
 
-    for (int index = 0; index < normalizedPlayers.length && index < 4; index++) {
+    for (
+      int index = 0;
+      index < normalizedPlayers.length && index < 4;
+      index++
+    ) {
       final uid = normalizedPlayers[index]['uid']?.toString() ?? '';
       if (uid.isEmpty) continue;
 
@@ -55,9 +62,11 @@ class GameService {
 
     // ✅ ডিলারের ডান সাইডের প্লেয়ার প্রথম হবে
     final dealerIdx = dealerIndex ?? 0;
-    
+
     if (dealerIdx < 0 || dealerIdx >= seatingOrder.length) {
-      debugPrint('❌ ERROR: Invalid dealer index $dealerIdx for seating order length ${seatingOrder.length}');
+      debugPrint(
+        '❌ ERROR: Invalid dealer index $dealerIdx for seating order length ${seatingOrder.length}',
+      );
       return;
     }
 
@@ -87,6 +96,15 @@ class GameService {
 
     // ✅ Get dealer ID from seating order
     final currentDealerId = seatingOrder[dealerIdx];
+    final missingSpadePlayers = <String>[];
+    for (final entry in hands.entries) {
+      final cards = (entry.value as List<dynamic>? ?? []).whereType<Map>().map(
+        (card) => Map<String, dynamic>.from(card),
+      );
+      if (!cards.any((card) => card['suit']?.toString() == '♠')) {
+        missingSpadePlayers.add(entry.key);
+      }
+    }
 
     final updateData = {
       'hands': hands,
@@ -98,7 +116,7 @@ class GameService {
       'targetScore': targetScore,
       'winner': '',
       'gameOver': false,
-      'status': 'bidding',
+      'status': missingSpadePlayers.isEmpty ? 'bidding' : 'suit_check',
       'round': round,
       'showSummary': false,
       'bidTurn': startPlayerUid, // ✅ ডিলারের ডান পাশের প্লেয়ার প্রথম বিড করবে
@@ -109,6 +127,7 @@ class GameService {
       'seatingOrder': seatingOrder,
       'currentDealerIndex': dealerIdx,
       'currentDealerId': currentDealerId,
+      'missingSpadePlayers': missingSpadePlayers,
     };
 
     debugPrint('✅ Updating Firebase with game data');

@@ -70,16 +70,15 @@ class _CardDistributionScreenState extends State<CardDistributionScreen> {
       if (claimedDistribution) {
         debugPrint('   ➜ Distributing cards for Round 1...');
         await GameService.distributeCards(widget.roomId, players);
-        await FirebaseFirestore.instance
-            .collection("rooms")
-            .doc(widget.roomId)
-            .update({"status": "bidding"});
       } else if (!claimedDistribution) {
         await FirebaseFirestore.instance
             .collection('rooms')
             .doc(widget.roomId)
             .snapshots()
-            .firstWhere((snapshot) => snapshot.data()?['status'] == 'bidding');
+            .firstWhere((snapshot) {
+              final status = snapshot.data()?['status'];
+              return status == 'bidding' || status == 'suit_check';
+            });
       }
 
       debugPrint('✅ [CardDistribution] Navigating to GameScreen...');
