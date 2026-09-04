@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../services/game_service.dart';
 import '../services/turn_service.dart';
+import 'home_screen.dart';
 import '../widgets/round_summary_dialog.dart';
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
@@ -217,20 +218,25 @@ class _GameScreenState extends State<GameScreen> {
   bool _isBidDialogShowing = false;
   bool _isProcessingBid = false;
   bool _isPlayingCard = false;
+  bool _isReportingMissingHeart = false;
+  String _lastRoomMessageId = '';
   BuildContext? _bidDialogContext;
   BuildContext? _summaryDialogContext;
 
   @override
   void initState() {
     super.initState();
-    SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
     _hasShownRoundSummary = false;
   }
 
   @override
   void dispose() {
     // ✅ Game Screen থেকে বের হলে Portrait Mode এ ফিরে যাবে
-    
+
     super.dispose();
   }
 
@@ -260,9 +266,13 @@ class _GameScreenState extends State<GameScreen> {
             final players = _normalizePlayers(data['players']);
             final hands = Map<String, dynamic>.from(data['hands'] ?? {});
             final myCards = _normalizeCards(hands[uid]);
+            final hasHeartCard = myCards.any(
+              (card) => card['suit']?.toString() == '♥',
+            );
             final sortedCards = List<Map<String, dynamic>>.from(myCards)
               ..sort(_compareCards);
             final currentTurn = data['currentTurn']?.toString() ?? '';
+            final status = data['status']?.toString() ?? '';
             final tableCards = _normalizeTableCards(data['tableCards']);
             final bids = Map<String, dynamic>.from(data['bids'] ?? {});
             final tricks = Map<String, dynamic>.from(data['tricks'] ?? {});
@@ -312,6 +322,29 @@ class _GameScreenState extends State<GameScreen> {
 
             // Trick Winner Detect
             final trickWinner = data['trickWinner']?.toString() ?? '';
+
+            final roomMessage = data['roomMessage'];
+            if (roomMessage is Map) {
+              final messageId = roomMessage['id']?.toString() ?? '';
+              if (messageId.isNotEmpty && messageId != _lastRoomMessageId) {
+                _lastRoomMessageId = messageId;
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted) return;
+                  final message = roomMessage['text']?.toString() ?? '';
+                  if (message.isNotEmpty) {
+                    ScaffoldMessenger.of(context)
+                      ..clearSnackBars()
+                      ..showSnackBar(
+                        SnackBar(
+                          content: Text(message),
+                          behavior: SnackBarBehavior.floating,
+                          duration: const Duration(seconds: 4),
+                        ),
+                      );
+                  }
+                });
+              }
+            }
 
             if (showSummary && !_hasShownRoundSummary) {
               _hasShownRoundSummary = true;
@@ -461,6 +494,34 @@ class _GameScreenState extends State<GameScreen> {
                   ),
                 ),
 
+                if (!hasHeartCard && !gameOver && status == 'bidding')
+                  Positioned(
+                    top: isSmallScreen ? 42 : 70,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: ElevatedButton.icon(
+                        onPressed: _isReportingMissingHeart
+                            ? null
+                            : () => _reportMissingHeart(players),
+                        icon: const Icon(Icons.favorite_border, size: 16),
+                        label: Text(
+                          _isReportingMissingHeart
+                              ? 'পাঠানো হচ্ছে...'
+                              : "I don't have 1 card.",
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _C.red,
+                          foregroundColor: _C.white,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+
                 // Waiting Banner
                 if (players.length == 4 &&
                     !gameOver &&
@@ -540,40 +601,64 @@ class _GameScreenState extends State<GameScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              _GoldButton(
-                label: 'Play Again',
-                onTap: () async {
-                  Navigator.of(ctx).pop();
-                  setState(() {
-                    _hasShownRoundSummary = false;
-                    _hasShownWinner = false;
-                    _hasRequestedBidDialog = false;
-                    _bidDialogContext = null;
-                    _isBidDialogShowing = false;
-                    _isProcessingBid = false;
-                  });
-                  await FirebaseFirestore.instance
-                      .collection('rooms')
-                      .doc(widget.roomId)
-                      .update({
-                        'playerScores': {},
-                        'winner': '',
-                        'gameOver': false,
-                        'roundNumber': 0,
-                        'currentDealerIndex': 0,
-                      });
-                  final roomDoc = await FirebaseFirestore.instance
-                      .collection('rooms')
-                      .doc(widget.roomId)
-                      .get();
-                  final players = roomDoc['players'] as List;
-                  await GameService.distributeCards(
-                    widget.roomId,
-                    players,
-                    round: 1,
-                    dealerIndex: 0,
-                  );
-                },
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: _C.goldLight,
+                        side: const BorderSide(color: _C.gold),
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                      ),
+                      onPressed: () {
+                        Navigator.of(ctx).pop();
+                        Navigator.of(context).pushAndRemoveUntil(
+                          MaterialPageRoute(builder: (_) => const HomeScreen()),
+                          (route) => false,
+                        );
+                      },
+                      child: const Text('Home'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _GoldButton(
+                      label: 'Play Again',
+                      onTap: () async {
+                        Navigator.of(ctx).pop();
+                        setState(() {
+                          _hasShownRoundSummary = false;
+                          _hasShownWinner = false;
+                          _hasRequestedBidDialog = false;
+                          _bidDialogContext = null;
+                          _isBidDialogShowing = false;
+                          _isProcessingBid = false;
+                        });
+                        await FirebaseFirestore.instance
+                            .collection('rooms')
+                            .doc(widget.roomId)
+                            .update({
+                              'playerScores': {},
+                              'winner': '',
+                              'gameOver': false,
+                              'roundNumber': 0,
+                              'currentDealerIndex': 0,
+                            });
+                        final roomDoc = await FirebaseFirestore.instance
+                            .collection('rooms')
+                            .doc(widget.roomId)
+                            .get();
+                        final players = roomDoc['players'] as List;
+                        await GameService.distributeCards(
+                          widget.roomId,
+                          players,
+                          round: 1,
+                          dealerIndex: 0,
+                        );
+                      },
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -623,6 +708,40 @@ class _GameScreenState extends State<GameScreen> {
       );
     } finally {
       if (mounted) setState(() => _isProcessingBid = false);
+    }
+  }
+
+  Future<void> _reportMissingHeart(List<Map<String, dynamic>> players) async {
+    if (_isReportingMissingHeart) return;
+
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (uid.isEmpty) return;
+
+    final player = players.firstWhere(
+      (entry) => entry['uid']?.toString() == uid,
+      orElse: () => <String, dynamic>{},
+    );
+    final playerName = player['name']?.toString() ?? 'A player';
+
+    setState(() => _isReportingMissingHeart = true);
+    try {
+      await FirebaseFirestore.instance
+          .collection('rooms')
+          .doc(widget.roomId)
+          .update({
+            'roomMessage': {
+              'id': DateTime.now().microsecondsSinceEpoch.toString(),
+              'text': '$playerName says: I don\'t have 1 card.',
+              'senderUid': uid,
+            },
+          });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString()), backgroundColor: _C.red),
+      );
+    } finally {
+      if (mounted) setState(() => _isReportingMissingHeart = false);
     }
   }
 
