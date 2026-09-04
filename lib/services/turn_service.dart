@@ -86,6 +86,21 @@ class TurnService {
     final cardSuit = card['suit']?.toString() ?? '';
 
     if (tableCards.isNotEmpty) {
+      const rankOrder = {
+        '2': 2,
+        '3': 3,
+        '4': 4,
+        '5': 5,
+        '6': 6,
+        '7': 7,
+        '8': 8,
+        '9': 9,
+        '10': 10,
+        'J': 11,
+        'Q': 12,
+        'K': 13,
+        'A': 14,
+      };
       final leadSuit =
           (tableCards.first['card'] as Map<String, dynamic>? ?? {})['suit']
               ?.toString() ??
@@ -97,6 +112,45 @@ class TurnService {
 
       if (hasLeadSuit && cardSuit != leadSuit) {
         throw Exception('You must play $leadSuit!');
+      }
+
+      final hasSpade = playerCards.any(
+        (playerCard) => playerCard['suit']?.toString() == '♠',
+      );
+      final tableSpadeRanks = tableCards
+          .map((entry) => entry['card'] as Map<String, dynamic>? ?? {})
+          .where((tableCard) => tableCard['suit']?.toString() == '♠')
+          .map((spade) => rankOrder[spade['rank']?.toString()] ?? 0)
+          .toList();
+      final highestTableSpade = tableSpadeRanks.isEmpty
+          ? 0
+          : tableSpadeRanks.reduce((a, b) => a > b ? a : b);
+      final hasHigherSpade = playerCards.any(
+        (playerCard) =>
+            playerCard['suit']?.toString() == '♠' &&
+            (rankOrder[playerCard['rank']?.toString()] ?? 0) >
+                highestTableSpade,
+      );
+
+      if (!hasLeadSuit &&
+          highestTableSpade == 0 &&
+          hasSpade &&
+          cardSuit != '♠') {
+        throw Exception('You must play a ♠ trump card!');
+      }
+
+      if (highestTableSpade > 0 &&
+          hasHigherSpade &&
+          cardSuit == '♠' &&
+          (rankOrder[card['rank']?.toString()] ?? 0) <= highestTableSpade) {
+        throw Exception('You must play a higher ♠ card!');
+      }
+
+      if (highestTableSpade > 0 && hasHigherSpade && !hasLeadSuit) {
+        if (cardSuit != '♠' ||
+            (rankOrder[card['rank']?.toString()] ?? 0) <= highestTableSpade) {
+          throw Exception('You must play a higher ♠ card!');
+        }
       }
     }
 
