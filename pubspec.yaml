@@ -38,6 +38,9 @@ dependencies:
   cloud_firestore:
   firebase_auth:
   uuid:
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.3
+  rename_app:
 
 dev_dependencies:
   flutter_test:
@@ -61,10 +64,14 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/Spades_logo.png"
+
   # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
+  assets:
+    - assets/images/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
