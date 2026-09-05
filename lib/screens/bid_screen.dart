@@ -1,7 +1,11 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../core/bloc/game_bloc.dart';
+import '../core/bloc/game_event.dart';
+import '../core/bloc/game_state.dart';
+import '../utils/app_orientation.dart';
 import 'game_screen.dart';
 
 class BidScreen extends StatefulWidget {
@@ -20,6 +24,12 @@ class BidScreen extends StatefulWidget {
 class _BidScreenState
     extends State<BidScreen> {
 
+  @override
+  void initState() {
+    super.initState();
+    AppOrientation.setLandscape();
+  }
+
   int bid = 0;
 
   bool submitted = false;
@@ -31,35 +41,27 @@ class _BidScreenState
             .currentUser!
             .uid;
 
-    await FirebaseFirestore.instance
-        .collection("rooms")
-        .doc(widget.roomId)
-        .update({
-
-      "bids.$uid": bid,
-    });
-
-    setState(() {
-      submitted = true;
-    });
+    context.read<GameBloc>().add(
+          BidSubmitted(roomId: widget.roomId, uid: uid, bid: bid),
+        );
   }
 
   @override
   Widget build(BuildContext context) {
 
-    return Scaffold(
-      backgroundColor:
-          const Color(0xff0B2341),
+    return BlocListener<GameBloc, GameState>(
+      listener: (context, state) {
+        if (state is BidSubmittedSuccess) {
+          setState(() => submitted = true);
+        }
+      },
+      child: Scaffold(
+        backgroundColor:
+            const Color(0xff0B2341),
 
       body: SafeArea(
-        child: StreamBuilder<
-            DocumentSnapshot>(
-          stream:
-              FirebaseFirestore
-                  .instance
-                  .collection("rooms")
-                  .doc(widget.roomId)
-                  .snapshots(),
+        child: StreamBuilder<GameState>(
+          stream: context.read<GameBloc>().watchGame(widget.roomId),
 
           builder:
               (context, snapshot) {
@@ -71,10 +73,11 @@ class _BidScreenState
               );
             }
 
-            final data =
-                snapshot.data!.data()
-                    as Map<String,
-                        dynamic>;
+            if (snapshot.data is! GameLoaded) {
+              return const Center(child: CircularProgressIndicator());
+            }
+
+            final data = (snapshot.data! as GameLoaded).data;
 
             final bids =
                 data["bids"] ?? {};
@@ -267,6 +270,7 @@ class _BidScreenState
             );
           },
         ),
+      ),
       ),
     );
   }

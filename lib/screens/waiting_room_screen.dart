@@ -1,12 +1,17 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../core/bloc/room_bloc.dart';
+import '../core/bloc/room_event.dart';
+import '../core/bloc/room_state.dart';
+import '../utils/app_orientation.dart';
 import 'card_distribution_screen.dart';
 
 class WaitingRoomScreen extends StatelessWidget {
   final String roomId;
+  static final Set<String> _navigationLocks = <String>{};
 
   const WaitingRoomScreen({super.key, required this.roomId});
 
@@ -48,49 +53,56 @@ class WaitingRoomScreen extends StatelessWidget {
           ),
         ),
       ),
-      body: StreamBuilder<DocumentSnapshot>(
-        stream: FirebaseFirestore.instance
-            .collection('rooms')
-            .doc(roomId)
-            .snapshots(),
+      body: StreamBuilder<RoomState>(
+        stream: context.read<RoomBloc>().watchRoom(roomId),
         builder: (context, snapshot) {
-          if (!snapshot.hasData) {
+          if (!snapshot.hasData || snapshot.data is RoomIdle) {
             return const Center(
               child: CircularProgressIndicator(color: accent),
             );
           }
 
-          if (!snapshot.data!.exists) {
+          final roomState = snapshot.data!;
+          if (roomState is RoomError) {
             return _buildRoomGoneState(context);
           }
 
-          final data = snapshot.data!.data() as Map<String, dynamic>;
+          if (roomState is! RoomLoaded) {
+            return const Center(
+              child: CircularProgressIndicator(color: accent),
+            );
+          }
+
+          final data = roomState.data;
 
           final List players = data['players'] ?? [];
           final String hostId = data['hostId'] ?? '';
           final String status = data['status'] ?? 'waiting';
-          final String currentUid = FirebaseAuth.instance.currentUser!.uid;
+          final String currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
           final bool isHost = currentUid == hostId;
           final bool isFull = players.length == maxPlayers;
 
           if (status == 'dealing') {
-            SystemChrome.setPreferredOrientations([
-              DeviceOrientation.landscapeLeft,
-              DeviceOrientation.landscapeRight,
-            ]);
-
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              Navigator.pushReplacement(
-                context,
-                PageRouteBuilder(
-                  transitionDuration: const Duration(milliseconds: 400),
-                  pageBuilder: (_, animation, __) =>
-                      CardDistributionScreen(roomId: roomId),
-                  transitionsBuilder: (_, animation, __, child) =>
-                      FadeTransition(opacity: animation, child: child),
-                ),
-              );
-            });
+            if (_navigationLocks.add(roomId)) {
+              AppOrientation.setLandscape();
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                try {
+                  if (!context.mounted) return;
+                  Navigator.pushReplacement(
+                    context,
+                    PageRouteBuilder(
+                      transitionDuration: const Duration(milliseconds: 400),
+                      pageBuilder: (_, animation, __) =>
+                          CardDistributionScreen(roomId: roomId),
+                      transitionsBuilder: (_, animation, __, child) =>
+                          FadeTransition(opacity: animation, child: child),
+                    ),
+                  );
+                } finally {
+                  _navigationLocks.remove(roomId);
+                }
+              });
+            }
           }
 
           return SafeArea(
@@ -314,19 +326,15 @@ class WaitingRoomScreen extends StatelessWidget {
           ),
         ),
         onPressed: isFull
-            ? () async {
+            ? () {
                 HapticFeedback.mediumImpact();
-                await FirebaseFirestore.instance
-                    .collection('rooms')
-                    .doc(roomId)
-                    .update({
-                      'status': 'dealing',
-                      'dealerIndex': 0,
-                      'roundNumber': 1,
-                      'bids': {},
-                      'tableCards': [],
-                      'roundWinner': '',
-                    });
+                context.read<RoomBloc>().add(
+                      StartGameRequested(
+                        roomId: roomId,
+                        dealerIndex: 0,
+                        roundNumber: 1,
+                      ),
+                    );
               }
             : null,
         child: Row(

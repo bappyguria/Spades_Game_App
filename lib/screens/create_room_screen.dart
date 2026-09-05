@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
-import '../services/firebase_service.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+
+import '../core/bloc/room_bloc.dart';
+import '../core/bloc/room_event.dart';
+import '../core/bloc/room_state.dart';
+import '../utils/app_orientation.dart';
 import 'waiting_room_screen.dart';
 
 class CreateRoomScreen extends StatefulWidget {
@@ -11,10 +16,15 @@ class CreateRoomScreen extends StatefulWidget {
 
 class _CreateRoomScreenState extends State<CreateRoomScreen> {
   final nameController = TextEditingController();
-  final FirebaseService service = FirebaseService();
   bool loading = false;
   bool _hasError = false;
   String? _errorText;
+
+  @override
+  void initState() {
+    super.initState();
+    AppOrientation.setPortrait();
+  }
 
   // Design Tokens (Same as JoinRoomScreen)
   static const Color bgBase = Color(0xFF0B1220);
@@ -53,27 +63,9 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
       _errorText = null;
     });
 
-    try {
-      final roomId = await service.createRoom(playerName);
-
-      if (!mounted) return;
-
-      Navigator.pushReplacement(
-        context,
-        PageRouteBuilder(
-          transitionDuration: const Duration(milliseconds: 400),
-          pageBuilder: (_, animation, __) => WaitingRoomScreen(roomId: roomId),
-          transitionsBuilder: (_, animation, __, child) => FadeTransition(opacity: animation, child: child),
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        loading = false;
-        _hasError = true;
-        _errorText = "Something went wrong. Please try again.";
-      });
-    }
+    context.read<RoomBloc>().add(
+          CreateRoomRequested(playerName: playerName),
+        );
   }
 
   @override
@@ -81,27 +73,49 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
     final size = MediaQuery.of(context).size;
     final isSmall = size.height < 700;
 
-    return Scaffold(
-      backgroundColor: bgBase,
-      body: SafeArea(
-        child: Stack(
-          children: [
-            _buildBackground(),
-            SingleChildScrollView(
-              padding: EdgeInsets.symmetric(horizontal: isSmall ? 20 : 28, vertical: isSmall ? 12 : 20),
-              child: Column(
-                children: [
-                  _buildTopBar(),
-                  SizedBox(height: isSmall ? 28 : 48),
-                  _buildHeader(isSmall),
-                  SizedBox(height: isSmall ? 32 : 44),
-                  _buildCreateCard(isSmall),
-                  SizedBox(height: isSmall ? 24 : 32),
-                  _buildPrivacyNote(),
-                ],
-              ),
+    return BlocListener<RoomBloc, RoomState>(
+      listener: (context, state) {
+        if (state is RoomCreated) {
+          Navigator.pushReplacement(
+            context,
+            PageRouteBuilder(
+              transitionDuration: const Duration(milliseconds: 400),
+              pageBuilder: (_, animation, __) =>
+                  WaitingRoomScreen(roomId: state.roomId),
+              transitionsBuilder: (_, animation, __, child) =>
+                  FadeTransition(opacity: animation, child: child),
             ),
-          ],
+          );
+        } else if (state is RoomError) {
+          setState(() {
+            loading = false;
+            _hasError = true;
+            _errorText = "Something went wrong. Please try again.";
+          });
+        }
+      },
+      child: Scaffold(
+        backgroundColor: bgBase,
+        body: SafeArea(
+          child: Stack(
+            children: [
+              _buildBackground(),
+              SingleChildScrollView(
+                padding: EdgeInsets.symmetric(horizontal: isSmall ? 20 : 28, vertical: isSmall ? 12 : 20),
+                child: Column(
+                  children: [
+                    _buildTopBar(),
+                    SizedBox(height: isSmall ? 28 : 48),
+                    _buildHeader(isSmall),
+                    SizedBox(height: isSmall ? 32 : 44),
+                    _buildCreateCard(isSmall),
+                    SizedBox(height: isSmall ? 24 : 32),
+                    _buildPrivacyNote(),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -125,7 +139,10 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
     return Container(
       width: sizeVal,
       height: sizeVal,
-      decoration: BoxDecoration(shape: BoxShape.circle, gradient: RadialGradient(colors: [color, Colors.transparent])),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: RadialGradient(colors: [color, Colors.transparent]),
+      ),
     );
   }
 

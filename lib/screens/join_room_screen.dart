@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import '../services/firebase_service.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+
+import '../core/bloc/room_bloc.dart';
+import '../core/bloc/room_event.dart';
+import '../core/bloc/room_state.dart';
+import '../utils/app_orientation.dart';
 import 'waiting_room_screen.dart';
 
 class JoinRoomScreen extends StatefulWidget {
@@ -17,6 +22,12 @@ class _JoinRoomScreenState extends State<JoinRoomScreen> {
   bool loading = false;
   bool _hasError = false;
   String? _errorText;
+
+  @override
+  void initState() {
+    super.initState();
+    AppOrientation.setPortrait();
+  }
 
   // Design Tokens
   static const Color bgBase = Color(0xFF0B1220);
@@ -67,35 +78,9 @@ class _JoinRoomScreenState extends State<JoinRoomScreen> {
       _errorText = null;
     });
 
-    try {
-      final service = FirebaseService();
-      final bool success = await service.joinRoom(roomId, playerName);
-
-      if (!mounted) return;
-
-      if (success) {
-        HapticFeedback.mediumImpact();
-        Navigator.pushReplacement(
-          context,
-          PageRouteBuilder(
-            transitionDuration: const Duration(milliseconds: 400),
-            pageBuilder: (_, animation, __) => WaitingRoomScreen(roomId: roomId),
-            transitionsBuilder: (_, animation, __, child) => FadeTransition(
-              opacity: animation,
-              child: child,
-            ),
-          ),
+    context.read<RoomBloc>().add(
+          JoinRoomRequested(roomId: roomId, playerName: playerName),
         );
-      } else {
-        HapticFeedback.heavyImpact();
-        setState(() => loading = false);
-        _setFieldError("Room not found or currently full");
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => loading = false);
-      _showSnackBar('Something went wrong. Please try again.', isError: true);
-    }
   }
 
   void _setFieldError(String message) {
@@ -125,32 +110,59 @@ class _JoinRoomScreenState extends State<JoinRoomScreen> {
     final size = MediaQuery.of(context).size;
     final isSmall = size.height < 700;
 
-    return Scaffold(
-      backgroundColor: bgBase,
-      body: SafeArea(
-        child: Stack(
-          children: [
-            _buildBackground(),
-            GestureDetector(
-              onTap: () => FocusScope.of(context).unfocus(),
-              child: SingleChildScrollView(
-                keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-                padding: EdgeInsets.symmetric(horizontal: isSmall ? 20 : 28, vertical: isSmall ? 12 : 20),
-                child: Column(
-                  children: [
-                    _buildTopBar(),
-                    SizedBox(height: isSmall ? 28 : 48),
-                    _buildHeader(isSmall),
-                    SizedBox(height: isSmall ? 32 : 44),
-                    _buildJoinCard(isSmall),
-                    SizedBox(height: isSmall ? 24 : 32),
-                    _buildPrivacyNote(),
-                    SizedBox(height: isSmall ? 12 : 20),
-                  ],
-                ),
+    return BlocListener<RoomBloc, RoomState>(
+      listener: (context, state) {
+        if (state is RoomJoined) {
+          HapticFeedback.mediumImpact();
+          Navigator.pushReplacement(
+            context,
+            PageRouteBuilder(
+              transitionDuration: const Duration(milliseconds: 400),
+              pageBuilder: (_, animation, __) =>
+                  WaitingRoomScreen(roomId: state.roomId),
+              transitionsBuilder: (_, animation, __, child) => FadeTransition(
+                opacity: animation,
+                child: child,
               ),
             ),
-          ],
+          );
+        } else if (state is RoomError) {
+          HapticFeedback.heavyImpact();
+          setState(() => loading = false);
+          _setFieldError(
+            state.message.contains('not found') || state.message.contains('full')
+                ? "Room not found or currently full"
+                : 'Something went wrong. Please try again.',
+          );
+        }
+      },
+      child: Scaffold(
+        backgroundColor: bgBase,
+        body: SafeArea(
+          child: Stack(
+            children: [
+              _buildBackground(),
+              GestureDetector(
+                onTap: () => FocusScope.of(context).unfocus(),
+                child: SingleChildScrollView(
+                  keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+                  padding: EdgeInsets.symmetric(horizontal: isSmall ? 20 : 28, vertical: isSmall ? 12 : 20),
+                  child: Column(
+                    children: [
+                      _buildTopBar(),
+                      SizedBox(height: isSmall ? 28 : 48),
+                      _buildHeader(isSmall),
+                      SizedBox(height: isSmall ? 32 : 44),
+                      _buildJoinCard(isSmall),
+                      SizedBox(height: isSmall ? 24 : 32),
+                      _buildPrivacyNote(),
+                      SizedBox(height: isSmall ? 12 : 20),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

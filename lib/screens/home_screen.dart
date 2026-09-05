@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../utils/app_orientation.dart';
 import 'create_room_screen.dart';
 import 'join_room_screen.dart';
 
@@ -79,6 +80,7 @@ class HomeScreen extends StatelessWidget {
                         shadowColor: const Color(0xFFD4A017).withOpacity(0.4),
                       ),
                       onPressed: () {
+                        AppOrientation.setPortrait();
                         Navigator.push(
                           context,
                           MaterialPageRoute(
@@ -128,6 +130,7 @@ class HomeScreen extends StatelessWidget {
                         elevation: 4,
                       ),
                       onPressed: () {
+                        AppOrientation.setPortrait();
                         Navigator.push(
                           context,
                           MaterialPageRoute(

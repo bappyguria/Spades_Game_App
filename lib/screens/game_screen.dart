@@ -1,11 +1,13 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 
-import '../services/game_service.dart';
-import '../services/turn_service.dart';
+import '../core/bloc/game_bloc.dart';
+import '../core/bloc/game_event.dart';
+import '../core/bloc/game_state.dart';
 import 'home_screen.dart';
+import '../utils/app_orientation.dart';
 import '../widgets/round_summary_dialog.dart';
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
@@ -211,7 +213,6 @@ class GameScreen extends StatefulWidget {
 }
 
 class _GameScreenState extends State<GameScreen> {
-  final TurnService _turnService = TurnService();
   bool _hasShownWinner = false;
   bool _hasRequestedBidDialog = false;
   bool _hasShownRoundSummary = false;
@@ -227,10 +228,7 @@ class _GameScreenState extends State<GameScreen> {
   @override
   void initState() {
     super.initState();
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    AppOrientation.setLandscape();
     _hasShownRoundSummary = false;
   }
 
@@ -250,20 +248,17 @@ class _GameScreenState extends State<GameScreen> {
     return Scaffold(
       backgroundColor: _C.bgDeep,
       body: SafeArea(
-        child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-          stream: FirebaseFirestore.instance
-              .collection('rooms')
-              .doc(widget.roomId)
-              .snapshots(),
+        child: StreamBuilder<GameState>(
+          stream: context.read<GameBloc>().watchGame(widget.roomId),
           builder: (context, snapshot) {
             if (snapshot.connectionState == ConnectionState.waiting) {
               return const _LoadingView();
             }
-            if (!snapshot.hasData || snapshot.data?.data() == null) {
+            if (!snapshot.hasData || snapshot.data is! GameLoaded) {
               return const _ErrorView('Room not found');
             }
 
-            final data = snapshot.data!.data()!;
+            final data = (snapshot.data! as GameLoaded).data;
             final players = _normalizePlayers(data['players']);
             final hands = Map<String, dynamic>.from(data['hands'] ?? {});
             final myCards = _normalizeCards(hands[uid]);
@@ -650,6 +645,7 @@ class _GameScreenState extends State<GameScreen> {
                         padding: const EdgeInsets.symmetric(vertical: 10),
                       ),
                       onPressed: () {
+                        AppOrientation.setPortrait();
                         Navigator.of(ctx).pop();
                         Navigator.of(context).pushAndRemoveUntil(
                           MaterialPageRoute(builder: (_) => const HomeScreen()),
@@ -673,27 +669,9 @@ class _GameScreenState extends State<GameScreen> {
                           _isBidDialogShowing = false;
                           _isProcessingBid = false;
                         });
-                        await FirebaseFirestore.instance
-                            .collection('rooms')
-                            .doc(widget.roomId)
-                            .update({
-                              'playerScores': {},
-                              'winner': '',
-                              'gameOver': false,
-                              'roundNumber': 0,
-                              'currentDealerIndex': 0,
-                            });
-                        final roomDoc = await FirebaseFirestore.instance
-                            .collection('rooms')
-                            .doc(widget.roomId)
-                            .get();
-                        final players = roomDoc['players'] as List;
-                        await GameService.distributeCards(
-                          widget.roomId,
-                          players,
-                          round: 1,
-                          dealerIndex: 0,
-                        );
+                        context.read<GameBloc>().add(
+                              ReplayRequested(roomId: widget.roomId),
+                            );
                       },
                     ),
                   ),
@@ -737,17 +715,11 @@ class _GameScreenState extends State<GameScreen> {
   Future<void> _submitBid({required String uid, required int bid}) async {
     if (_isProcessingBid) return;
     setState(() => _isProcessingBid = true);
-    try {
-      await _turnService.submitBid(roomId: widget.roomId, uid: uid, bid: bid);
-      HapticFeedback.selectionClick();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString()), backgroundColor: _C.red),
-      );
-    } finally {
-      if (mounted) setState(() => _isProcessingBid = false);
-    }
+    context.read<GameBloc>().add(
+          BidSubmitted(roomId: widget.roomId, uid: uid, bid: bid),
+        );
+    HapticFeedback.selectionClick();
+    if (mounted) setState(() => _isProcessingBid = false);
   }
 
   Future<void> _startNextRoundAfterSuitCheck(
@@ -759,20 +731,14 @@ class _GameScreenState extends State<GameScreen> {
     if (uid.isEmpty) return;
 
     setState(() => _isReportingMissingHeart = true);
-    try {
-      await _turnService.startNextRoundAfterSuitCheck(
-        roomId: widget.roomId,
-        uid: uid,
-        players: players,
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString()), backgroundColor: _C.red),
-      );
-    } finally {
-      if (mounted) setState(() => _isReportingMissingHeart = false);
-    }
+    context.read<GameBloc>().add(
+          SuitCheckNextRoundRequested(
+            roomId: widget.roomId,
+            uid: uid,
+            players: players,
+          ),
+        );
+    if (mounted) setState(() => _isReportingMissingHeart = false);
   }
 
   Future<void> _reportMissingSuit(
@@ -791,25 +757,14 @@ class _GameScreenState extends State<GameScreen> {
     final playerName = player['name']?.toString() ?? 'A player';
 
     setState(() => _isReportingMissingSuit = true);
-    try {
-      await FirebaseFirestore.instance
-          .collection('rooms')
-          .doc(widget.roomId)
-          .update({
-            'roomMessage': {
-              'id': DateTime.now().microsecondsSinceEpoch.toString(),
-              'text': '$playerName এর কাছে কার্ড নেই।',
-              'senderUid': uid,
-            },
-          });
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString()), backgroundColor: _C.red),
-      );
-    } finally {
-      if (mounted) setState(() => _isReportingMissingSuit = false);
-    }
+    context.read<GameBloc>().add(
+          MissingSuitReported(
+            roomId: widget.roomId,
+            uid: uid,
+            playerName: playerName,
+          ),
+        );
+    if (mounted) setState(() => _isReportingMissingSuit = false);
   }
 
   Future<void> _showBidDialog({
@@ -937,17 +892,11 @@ class _GameScreenState extends State<GameScreen> {
     // ✅ Animation: কার্ডটি হাত থেকে (নিচ থেকে) শুরু হয়ে টেবিলে Slide/Fly করবে
     _showCardFlyAnimation(card);
 
-    try {
-      await _turnService.playCard(roomId: widget.roomId, uid: uid, card: card);
-      HapticFeedback.mediumImpact();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString()), backgroundColor: _C.red),
-      );
-    } finally {
-      if (mounted) setState(() => _isPlayingCard = false);
-    }
+    context.read<GameBloc>().add(
+          CardPlayed(roomId: widget.roomId, uid: uid, card: card),
+        );
+    HapticFeedback.mediumImpact();
+    if (mounted) setState(() => _isPlayingCard = false);
   }
 
   // ✅ Card Fly Animation (নিচ থেকে শুরু → টেবিলে)

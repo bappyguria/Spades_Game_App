@@ -1,8 +1,11 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 
-import '../services/game_service.dart';
+import '../core/bloc/game_bloc.dart';
+import '../core/bloc/game_event.dart';
+import '../core/bloc/game_state.dart';
+import '../utils/app_orientation.dart';
 import 'game_screen.dart';
 
 class CardDistributionScreen extends StatefulWidget {
@@ -25,10 +28,7 @@ class _CardDistributionScreenState extends State<CardDistributionScreen> {
   @override
   void initState() {
     super.initState();
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    AppOrientation.setLandscape();
     WidgetsBinding.instance.addPostFrameCallback((_) => _startDistribution());
   }
 
@@ -39,77 +39,9 @@ class _CardDistributionScreenState extends State<CardDistributionScreen> {
       _isProcessing = true;
     });
 
-    try {
-      final roomDoc = await FirebaseFirestore.instance
-          .collection("rooms")
-          .doc(widget.roomId)
-          .get();
-
-      final roomData = roomDoc.data() ?? {};
-      final players = roomData["players"] as List? ?? [];
-
-      debugPrint('📦 [CardDistribution] Starting card distribution...');
-      debugPrint('   Room ID: ${widget.roomId}');
-      debugPrint('   Already Distributed: ${widget.alreadyDistributed}');
-      debugPrint('   Players Count: ${players.length}');
-
-      final claimedDistribution = await FirebaseFirestore.instance
-          .runTransaction<bool>((transaction) async {
-            final currentRoom = await transaction.get(
-              FirebaseFirestore.instance.collection('rooms').doc(widget.roomId),
-            );
-            final status = currentRoom.data()?['status']?.toString() ?? '';
-            if (status != 'dealing') return false;
-
-            transaction.update(currentRoom.reference, {
-              'status': 'distributing',
-            });
-            return true;
-          });
-
-      if (claimedDistribution) {
-        debugPrint('   ➜ Distributing cards for Round 1...');
-        await GameService.distributeCards(widget.roomId, players);
-      } else if (!claimedDistribution) {
-        await FirebaseFirestore.instance
-            .collection('rooms')
-            .doc(widget.roomId)
-            .snapshots()
-            .firstWhere((snapshot) {
-              final status = snapshot.data()?['status'];
-              return status == 'bidding' || status == 'suit_check';
-            });
-      }
-
-      debugPrint('✅ [CardDistribution] Navigating to GameScreen...');
-
-      if (!mounted) return;
-
-      Navigator.pushReplacement(
-        context,
-        PageRouteBuilder(
-          transitionDuration: const Duration(milliseconds: 300),
-          pageBuilder: (_, animation, __) => GameScreen(roomId: widget.roomId),
-          transitionsBuilder: (_, animation, __, child) =>
-              FadeTransition(opacity: animation, child: child),
-        ),
-      );
-    } catch (e) {
-      debugPrint('❌ [CardDistribution] Error: $e');
-      if (!mounted) return;
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error: $e'),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 3),
-        ),
-      );
-
-      setState(() {
-        _isProcessing = false;
-      });
-    }
+    context.read<GameBloc>().add(
+          InitialDistributionRequested(roomId: widget.roomId),
+        );
   }
 
   @override
@@ -121,9 +53,33 @@ class _CardDistributionScreenState extends State<CardDistributionScreen> {
   Widget build(BuildContext context) {
     final size = MediaQuery.of(context).size;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF0B1220),
-      body: SafeArea(
+    return BlocListener<GameBloc, GameState>(
+      listener: (context, state) {
+        if (state is InitialDistributionCompleted) {
+          Navigator.pushReplacement(
+            context,
+            PageRouteBuilder(
+              transitionDuration: const Duration(milliseconds: 300),
+              pageBuilder: (_, animation, __) =>
+                  GameScreen(roomId: widget.roomId),
+              transitionsBuilder: (_, animation, __, child) =>
+                  FadeTransition(opacity: animation, child: child),
+            ),
+          );
+        } else if (state is GameError) {
+          setState(() => _isProcessing = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Error: ${state.message}'),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        }
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFF0B1220),
+        body: SafeArea(
         child: Stack(
           children: [
             // ✅ Background gradient
@@ -201,6 +157,7 @@ class _CardDistributionScreenState extends State<CardDistributionScreen> {
               ),
             ),
           ],
+        ),
         ),
       ),
     );
