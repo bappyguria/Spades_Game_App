@@ -101,6 +101,7 @@ class _BidScreenState
                           GameScreen(
                         roomId:
                             widget.roomId,
+                        animateInitialDeal: false,
                       ),
                     ),
                   );

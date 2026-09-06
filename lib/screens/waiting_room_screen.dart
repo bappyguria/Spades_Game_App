@@ -6,34 +6,85 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import '../core/bloc/room_bloc.dart';
 import '../core/bloc/room_event.dart';
 import '../core/bloc/room_state.dart';
+import '../services/presence_service.dart';
 import '../utils/app_orientation.dart';
-import 'card_distribution_screen.dart';
+import '../utils/player_presence.dart';
+import '../widgets/player_presence_indicator.dart';
+import 'game_screen.dart';
 
-class WaitingRoomScreen extends StatelessWidget {
+class WaitingRoomScreen extends StatefulWidget {
   final String roomId;
+
+  static const Color bgBase = Color(0xFF0B1220);
+  static const Color bgElevated = Color(0xFF141D2E);
+  static const Color accent = Color(0xFFE8A93B);
+  static const Color danger = Color(0xFFEF5350);
+  static const Color textPrimary = Color(0xFFF5F7FA);
+  static const Color textSecondary = Color(0xFFA9B4C6);
+  static const Color textMuted = Color(0xFF6B7690);
+  static const Color borderSubtle = Color(0x1FFFFFFF);
+  static const double _radiusLg = 22.0;
+  static const double _radiusMd = 14.0;
+
   static final Set<String> _navigationLocks = <String>{};
 
   const WaitingRoomScreen({super.key, required this.roomId});
+
+  @override
+  State<WaitingRoomScreen> createState() => _WaitingRoomScreenState();
+}
+
+class _WaitingRoomScreenState extends State<WaitingRoomScreen> {
+  final PresenceService _presenceService = PresenceService();
+  String _presenceKey = '';
+
+  static final Set<String> _navigationLocks =
+      WaitingRoomScreen._navigationLocks;
+  static const Color bgBase = WaitingRoomScreen.bgBase;
+  static const Color bgElevated = WaitingRoomScreen.bgElevated;
+  static const Color accent = WaitingRoomScreen.accent;
+  static const Color danger = WaitingRoomScreen.danger;
+  static const Color textPrimary = WaitingRoomScreen.textPrimary;
+  static const Color textSecondary = WaitingRoomScreen.textSecondary;
+  static const Color textMuted = WaitingRoomScreen.textMuted;
+  static const Color borderSubtle = WaitingRoomScreen.borderSubtle;
+  static const double _radiusLg = WaitingRoomScreen._radiusLg;
+  static const double _radiusMd = WaitingRoomScreen._radiusMd;
+
+  String get roomId => widget.roomId;
 
   // ---------------------------------------------------------------------
   // DESIGN SYSTEM — kept identical to JoinRoomScreen so the two screens
   // feel like the same product.
   // ---------------------------------------------------------------------
-  static const Color bgBase = Color(0xFF0B1220);
-  static const Color bgElevated = Color(0xFF141D2E);
   static const Color bgSurface = Color(0xFF1B2740);
-  static const Color accent = Color(0xFFE8A93B);
   static const Color accentSoft = Color(0xFFF3C877);
-  static const Color danger = Color(0xFFEF5350);
-
-  static const Color textPrimary = Color(0xFFF5F7FA);
-  static const Color textSecondary = Color(0xFFA9B4C6);
-  static const Color textMuted = Color(0xFF6B7690);
-  static const Color borderSubtle = Color(0x1FFFFFFF);
 
   static const int maxPlayers = 4;
-  static const _radiusLg = 22.0;
-  static const _radiusMd = 14.0;
+
+  void _syncPresence(List players) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    Map<String, dynamic>? currentPlayer;
+    for (final entry in players) {
+      if (entry is Map && entry['uid']?.toString() == uid) {
+        currentPlayer = Map<String, dynamic>.from(entry);
+        break;
+      }
+    }
+
+    final name = currentPlayer?['name']?.toString() ?? '';
+    final key = '${widget.roomId}|$uid|$name';
+    if (uid.isEmpty || name.isEmpty || key == _presenceKey) return;
+
+    _presenceKey = key;
+    _presenceService.start(roomId: widget.roomId, uid: uid, name: name);
+  }
+
+  @override
+  void dispose() {
+    _presenceService.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -76,9 +127,14 @@ class WaitingRoomScreen extends StatelessWidget {
           final data = roomState.data;
 
           final List players = data['players'] ?? [];
+          final presence = data['presence'] is Map
+              ? Map<String, dynamic>.from(data['presence'] as Map)
+              : <String, dynamic>{};
+          _syncPresence(players);
           final String hostId = data['hostId'] ?? '';
           final String status = data['status'] ?? 'waiting';
-          final String currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+          final String currentUid =
+              FirebaseAuth.instance.currentUser?.uid ?? '';
           final bool isHost = currentUid == hostId;
           final bool isFull = players.length == maxPlayers;
 
@@ -93,7 +149,7 @@ class WaitingRoomScreen extends StatelessWidget {
                     PageRouteBuilder(
                       transitionDuration: const Duration(milliseconds: 400),
                       pageBuilder: (_, animation, __) =>
-                          CardDistributionScreen(roomId: roomId),
+                          GameScreen(roomId: roomId),
                       transitionsBuilder: (_, animation, __, child) =>
                           FadeTransition(opacity: animation, child: child),
                     ),
@@ -122,8 +178,7 @@ class WaitingRoomScreen extends StatelessWidget {
                       shrinkWrap: true,
                       physics: const NeverScrollableScrollPhysics(),
                       itemCount: players.length,
-                      separatorBuilder: (_, __) =>
-                          const SizedBox(height: 10),
+                      separatorBuilder: (_, __) => const SizedBox(height: 10),
                       itemBuilder: (_, index) {
                         final player = players[index];
                         final bool host = player['uid'] == hostId;
@@ -131,6 +186,9 @@ class WaitingRoomScreen extends StatelessWidget {
                           index: index,
                           name: player['name']?.toString() ?? 'Player',
                           isHost: host,
+                          isOnline: playerOnline(
+                            presence[player['uid']?.toString()],
+                          ),
                         );
                       },
                     ),
@@ -329,12 +387,12 @@ class WaitingRoomScreen extends StatelessWidget {
             ? () {
                 HapticFeedback.mediumImpact();
                 context.read<RoomBloc>().add(
-                      StartGameRequested(
-                        roomId: roomId,
-                        dealerIndex: 0,
-                        roundNumber: 1,
-                      ),
-                    );
+                  StartGameRequested(
+                    roomId: roomId,
+                    dealerIndex: 0,
+                    roundNumber: 1,
+                  ),
+                );
               }
             : null,
         child: Row(
@@ -400,11 +458,13 @@ class _PlayerTile extends StatelessWidget {
     required this.index,
     required this.name,
     required this.isHost,
+    required this.isOnline,
   });
 
   final int index;
   final String name;
   final bool isHost;
+  final bool? isOnline;
 
   static const List<Color> _avatarColors = [
     Color(0xFFE8A93B),
@@ -451,6 +511,8 @@ class _PlayerTile extends StatelessWidget {
               ),
             ),
           ),
+          PlayerPresenceIndicator(isOnline: isOnline),
+          const SizedBox(width: 8),
           if (isHost)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),

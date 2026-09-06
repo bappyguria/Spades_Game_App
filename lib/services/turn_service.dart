@@ -27,18 +27,89 @@ class TurnService {
     bids[uid] = bid;
     final nextBidder = GameService.getNextBidder(bidOrder, uid);
     final allBidsDone = bids.length == players.length;
+    Map<String, dynamic>? lowBidSummary;
 
     final updateData = <String, dynamic>{'bids': bids};
 
     if (allBidsDone) {
-      updateData['bidTurn'] = '';
-      updateData['status'] = 'playing';
-      updateData['currentTurn'] = bidOrder.isNotEmpty ? bidOrder.first : '';
+      final totalBid = bids.values.fold<int>(
+        0,
+        (total, value) => total + (int.tryParse(value.toString()) ?? 0),
+      );
+
+      if (totalBid < 11) {
+        final playerScores = Map<String, int>.from(
+          data['playerScores'] ?? {},
+        );
+        for (final player in players) {
+          final playerUid = player['uid']?.toString() ?? '';
+          final playerBid =
+              int.tryParse(bids[playerUid]?.toString() ?? '0') ?? 0;
+          playerScores[playerUid] =
+              (playerScores[playerUid] ?? 0) + (playerBid * 10);
+        }
+
+        final roundNumber =
+            ((data['roundNumber'] as num?)?.toInt() ?? 1) + 1;
+        final seatingOrder = (data['seatingOrder'] as List<dynamic>? ?? [])
+            .map((entry) => entry.toString())
+            .where((entry) => entry.isNotEmpty)
+            .toList();
+        final currentDealerIndex =
+            (data['currentDealerIndex'] as num?)?.toInt() ?? 0;
+        final nextDealerIndex = seatingOrder.isEmpty
+            ? 0
+            : (currentDealerIndex + 1) % seatingOrder.length;
+        final nextBidOrder = <String>[];
+        for (var index = 0; index < seatingOrder.length; index++) {
+          nextBidOrder.add(
+            seatingOrder[(nextDealerIndex + 1 + index) % seatingOrder.length],
+          );
+        }
+        final roundSummary = {
+          'roundNumber': roundNumber,
+          'playerScores': playerScores,
+          'playerBids': bids,
+          'playerTricks': <String, int>{},
+          'dealerUid': data['currentDealerId']?.toString() ?? '',
+            'newDealerIndex': nextDealerIndex,
+            'newDealerUid': seatingOrder.isEmpty
+              ? ''
+              : seatingOrder[nextDealerIndex],
+            'newBidOrder': nextBidOrder,
+          'targetScore': 100,
+          'totalBid': totalBid,
+        };
+        lowBidSummary = roundSummary;
+
+        updateData.addAll({
+          'bidTurn': '',
+          'status': 'round_complete',
+          'currentTurn': '',
+          'playerScores': playerScores,
+          'roundNumber': roundNumber,
+          'roundSummary': roundSummary,
+          'showSummary': true,
+        });
+      } else {
+        updateData['bidTurn'] = '';
+        updateData['status'] = 'playing';
+        updateData['currentTurn'] = bidOrder.isNotEmpty ? bidOrder.first : '';
+      }
     } else {
       updateData['bidTurn'] = nextBidder;
     }
 
     await roomRef.update(updateData);
+
+    if (lowBidSummary != null) {
+      await Future.delayed(const Duration(seconds: 5));
+      await _startNextRound(
+        roomId: roomId,
+        summary: lowBidSummary!,
+        players: players,
+      );
+    }
   }
 
   Future<void> playCard({

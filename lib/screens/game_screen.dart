@@ -6,15 +6,16 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import '../core/bloc/game_bloc.dart';
 import '../core/bloc/game_event.dart';
 import '../core/bloc/game_state.dart';
+import '../services/presence_service.dart';
 import 'home_screen.dart';
 import '../utils/app_orientation.dart';
+import '../utils/player_presence.dart';
+import '../widgets/player_presence_indicator.dart';
 import '../widgets/round_summary_dialog.dart';
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 class _C {
   static const bgDeep = Color(0xFF0A1A2B);
-  static const bgTable = Color(0xFF12304A);
-  static const bgPanel = Color(0xFF1B3A5C);
   static const gold = Color(0xFFD4AF37);
   static const goldLight = Color(0xFFFFD700);
   static const goldDark = Color(0xFF996515);
@@ -23,7 +24,6 @@ class _C {
   static const white = Colors.white;
   static const white80 = Color(0xCCFFFFFF);
   static const white50 = Color(0x80FFFFFF);
-  static const white20 = Color(0x33FFFFFF);
   static const black = Colors.black;
 }
 
@@ -47,7 +47,32 @@ final _panelGrad = const LinearGradient(
 final _tableBg = const RadialGradient(
   center: Alignment.center,
   radius: 1.0,
-  colors: [Color(0xFF163C5A), Color(0xFF081A2B)],
+  colors: [Color(0xFF1454A0), Color(0xFF061632)],
+);
+
+final _woodTableGrad = const LinearGradient(
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+  colors: [
+    Color(0xFFFFDF7A),
+    Color(0xFFC78329),
+    Color(0xFF6A3213),
+    Color(0xFFB86D20),
+    Color(0xFFFFD96A),
+  ],
+  stops: [0.0, 0.22, 0.50, 0.78, 1.0],
+);
+
+final _feltTableGrad = const RadialGradient(
+  center: Alignment(0, -.18),
+  radius: 1.15,
+  colors: [
+    Color(0xFFD9414F),
+    Color(0xFFB71F31),
+    Color(0xFF781426),
+    Color(0xFF430D1B),
+  ],
+  stops: [0.0, 0.36, 0.72, 1.0],
 );
 
 // ── Reusable Widgets ─────────────────────────────────────────────────────────
@@ -205,14 +230,24 @@ class _GoldButton extends StatelessWidget {
 
 // ── Main Game Screen State ────────────────────────────────────────────────────
 class GameScreen extends StatefulWidget {
-  const GameScreen({super.key, required this.roomId});
+  const GameScreen({
+    super.key,
+    required this.roomId,
+    this.animateInitialDeal = true,
+  });
   final String roomId;
+  final bool animateInitialDeal;
 
   @override
   State<GameScreen> createState() => _GameScreenState();
 }
 
 class _GameScreenState extends State<GameScreen> {
+  final PresenceService _presenceService = PresenceService();
+  Stream<GameState>? _gameStream;
+  bool _initialDistributionRequested = false;
+  bool _dealAnimationFinished = false;
+  bool _showDealAnimation = false;
   bool _hasShownWinner = false;
   bool _hasRequestedBidDialog = false;
   bool _hasShownRoundSummary = false;
@@ -221,6 +256,12 @@ class _GameScreenState extends State<GameScreen> {
   bool _isPlayingCard = false;
   bool _isReportingMissingHeart = false;
   bool _isReportingMissingSuit = false;
+  bool _tableAnimationStateReady = false;
+  bool _isCollectingTrick = false;
+  final Set<String> _animatedTableCards = <String>{};
+  final Set<String> _visibleTableCards = <String>{};
+  String _animatedTrickKey = '';
+  String _dealKey = '';
   String _lastRoomMessageId = '';
   BuildContext? _bidDialogContext;
   BuildContext? _summaryDialogContext;
@@ -230,11 +271,19 @@ class _GameScreenState extends State<GameScreen> {
     super.initState();
     AppOrientation.setLandscape();
     _hasShownRoundSummary = false;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _initialDistributionRequested) return;
+      _initialDistributionRequested = true;
+      context.read<GameBloc>().add(
+        InitialDistributionRequested(roomId: widget.roomId),
+      );
+    });
   }
 
   @override
   void dispose() {
     // ✅ Game Screen থেকে বের হলে Portrait Mode এ ফিরে যাবে
+    _presenceService.dispose();
 
     super.dispose();
   }
@@ -244,14 +293,18 @@ class _GameScreenState extends State<GameScreen> {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     final screenWidth = MediaQuery.of(context).size.width;
     final isSmallScreen = screenWidth < 600;
+    final gameStream = _gameStream ??= context.read<GameBloc>().watchGame(
+      widget.roomId,
+    );
 
     return Scaffold(
       backgroundColor: _C.bgDeep,
       body: SafeArea(
         child: StreamBuilder<GameState>(
-          stream: context.read<GameBloc>().watchGame(widget.roomId),
+          stream: gameStream,
           builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
+            if (!snapshot.hasData &&
+                snapshot.connectionState == ConnectionState.waiting) {
               return const _LoadingView();
             }
             if (!snapshot.hasData || snapshot.data is! GameLoaded) {
@@ -260,6 +313,10 @@ class _GameScreenState extends State<GameScreen> {
 
             final data = (snapshot.data! as GameLoaded).data;
             final players = _normalizePlayers(data['players']);
+            final presence = data['presence'] is Map
+                ? Map<String, dynamic>.from(data['presence'] as Map)
+                : <String, dynamic>{};
+            _syncPresence(players, uid);
             final hands = Map<String, dynamic>.from(data['hands'] ?? {});
             final myCards = _normalizeCards(hands[uid]);
             const nonSpadeSuits = ['♣', '♦', '♥'];
@@ -291,7 +348,7 @@ class _GameScreenState extends State<GameScreen> {
             final bidOrder = (data['bidOrder'] as List<dynamic>? ?? [])
                 .map((e) => e.toString())
                 .toList();
-            final isMyBidTurn =
+            final isMyBidTurnForState =
                 status == 'bidding' &&
                 bidTurn == uid &&
                 !hasSubmittedBid &&
@@ -323,9 +380,44 @@ class _GameScreenState extends State<GameScreen> {
             String uidAt(int rel) => playerAt(rel)?['uid']?.toString() ?? '';
             String nameAt(int rel) =>
                 playerAt(rel)?['name']?.toString() ?? 'Player';
+            bool? onlineAt(int rel) => playerOnline(presence[uidAt(rel)]);
 
             // Trick Winner Detect
             final trickWinner = data['trickWinner']?.toString() ?? '';
+
+            final dealKey = '${data['round'] ?? data['roundNumber'] ?? ''}';
+            final isDealPhase =
+                hands.isNotEmpty &&
+                (status == 'bidding' || status == 'suit_check');
+            if (isDealPhase && dealKey != _dealKey) {
+              _dealKey = dealKey;
+              _tableAnimationStateReady = false;
+              _isCollectingTrick = false;
+              _animatedTableCards.clear();
+              _visibleTableCards.clear();
+              _animatedTrickKey = '';
+              _dealAnimationFinished = !widget.animateInitialDeal;
+              _hasRequestedBidDialog = false;
+              _isProcessingBid = false;
+              _isBidDialogShowing = false;
+              _bidDialogContext = null;
+              if (widget.animateInitialDeal) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted) return;
+                  setState(() => _showDealAnimation = true);
+                });
+              }
+            }
+            final dealAnimationReady =
+                !widget.animateInitialDeal || !_showDealAnimation;
+            final isMyBidTurn = isMyBidTurnForState && dealAnimationReady;
+
+            _syncTableAnimations(
+              tableCards: tableCards,
+              trickWinner: trickWinner,
+              players: players,
+              myUid: uid,
+            );
 
             final roomMessage = data['roomMessage'];
             if (roomMessage is Map) {
@@ -415,6 +507,9 @@ class _GameScreenState extends State<GameScreen> {
                     child: _FeltTable(
                       players: players,
                       tableCards: tableCards,
+                      visibleTableCardKeys: _isCollectingTrick
+                          ? const <String>{}
+                          : _visibleTableCards,
                       currentTurn: currentTurn,
                       myUid: uid,
                       trickWinner: trickWinner,
@@ -426,8 +521,8 @@ class _GameScreenState extends State<GameScreen> {
                 // Player Details - Serial Order অনুযায়ী
                 // Me (Bottom) - সবচেয়ে নিচে
                 Positioned(
-                  bottom: isSmallScreen ? 8 : 30,
-                  left: isSmallScreen ? 8 : 20,
+                  bottom: 0,
+                  left: 0,
                   child: _PlayerCornerCard(
                     player: players.isNotEmpty ? players.first : null,
                     name: 'You',
@@ -437,29 +532,34 @@ class _GameScreenState extends State<GameScreen> {
                     point: myPoint,
                     isMe: true,
                     isSmallScreen: isSmallScreen,
+                    isOnline: playerOnline(presence[uid]),
                   ),
                 ),
 
                 // Right Player (Serial 1)
                 Positioned(
-                  top: isSmallScreen ? 60 : 120,
+                  top: 0,
+                  bottom: 0,
                   right: isSmallScreen ? 8 : 20,
-                  child: _PlayerCornerCard(
-                    player: playerAt(1),
-                    name: nameAt(1),
-                    isTurn: currentTurn == uidAt(1),
-                    bid: _valueFor(bids, uidAt(1)),
-                    tricks: _valueFor(tricks, uidAt(1)),
-                    point: _valueFor(playerScores, uidAt(1)),
-                    isSmallScreen: isSmallScreen,
+                  child: Center(
+                    child: _PlayerCornerCard(
+                      player: playerAt(1),
+                      name: nameAt(1),
+                      isTurn: currentTurn == uidAt(1),
+                      bid: _valueFor(bids, uidAt(1)),
+                      tricks: _valueFor(tricks, uidAt(1)),
+                      point: _valueFor(playerScores, uidAt(1)),
+                      isSmallScreen: isSmallScreen,
+                      isOnline: onlineAt(1),
+                    ),
                   ),
                 ),
 
                 // Top Player (Serial 2)
                 Positioned(
-                  top: isSmallScreen ? 8 : 30,
+                  top: isSmallScreen ? 8 : 2,
                   left: 0,
-                  right: isSmallScreen ? 100 : 150,
+                  right: 0,
                   child: Center(
                     child: _PlayerCornerCard(
                       player: playerAt(2),
@@ -469,22 +569,27 @@ class _GameScreenState extends State<GameScreen> {
                       tricks: _valueFor(tricks, uidAt(2)),
                       point: _valueFor(playerScores, uidAt(2)),
                       isSmallScreen: isSmallScreen,
+                      isOnline: onlineAt(2),
                     ),
                   ),
                 ),
 
                 // Left Player (Serial 3)
                 Positioned(
+                  top: 0,
+                  bottom: 0,
                   left: isSmallScreen ? 8 : 20,
-                  top: isSmallScreen ? 60 : 120,
-                  child: _PlayerCornerCard(
-                    player: playerAt(3),
-                    name: nameAt(3),
-                    isTurn: currentTurn == uidAt(3),
-                    bid: _valueFor(bids, uidAt(3)),
-                    tricks: _valueFor(tricks, uidAt(3)),
-                    point: _valueFor(playerScores, uidAt(3)),
-                    isSmallScreen: isSmallScreen,
+                  child: Center(
+                    child: _PlayerCornerCard(
+                      player: playerAt(3),
+                      name: nameAt(3),
+                      isTurn: currentTurn == uidAt(3),
+                      bid: _valueFor(bids, uidAt(3)),
+                      tricks: _valueFor(tricks, uidAt(3)),
+                      point: _valueFor(playerScores, uidAt(3)),
+                      isSmallScreen: isSmallScreen,
+                      isOnline: onlineAt(3),
+                    ),
                   ),
                 ),
 
@@ -577,11 +682,11 @@ class _GameScreenState extends State<GameScreen> {
 
                 // Bottom (You Cards)
                 Positioned(
-                  bottom: 0,
+                  bottom: -15,
                   left: 0,
                   right: 0,
                   child: _MyHand(
-                    cards: sortedCards,
+                    cards: dealAnimationReady ? sortedCards : const [],
                     isMyTurn: isMyTurn,
                     isSmallScreen: isSmallScreen,
                     onCardTap: (card) {
@@ -589,6 +694,22 @@ class _GameScreenState extends State<GameScreen> {
                     },
                   ),
                 ),
+                if (_showDealAnimation)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: _DealAnimation(
+                        isSmallScreen: isSmallScreen,
+                        onComplete: () {
+                          if (mounted) {
+                            setState(() {
+                              _showDealAnimation = false;
+                              _dealAnimationFinished = true;
+                            });
+                          }
+                        },
+                      ),
+                    ),
+                  ),
               ],
             );
           },
@@ -670,8 +791,8 @@ class _GameScreenState extends State<GameScreen> {
                           _isProcessingBid = false;
                         });
                         context.read<GameBloc>().add(
-                              ReplayRequested(roomId: widget.roomId),
-                            );
+                          ReplayRequested(roomId: widget.roomId),
+                        );
                       },
                     ),
                   ),
@@ -716,8 +837,8 @@ class _GameScreenState extends State<GameScreen> {
     if (_isProcessingBid) return;
     setState(() => _isProcessingBid = true);
     context.read<GameBloc>().add(
-          BidSubmitted(roomId: widget.roomId, uid: uid, bid: bid),
-        );
+      BidSubmitted(roomId: widget.roomId, uid: uid, bid: bid),
+    );
     HapticFeedback.selectionClick();
     if (mounted) setState(() => _isProcessingBid = false);
   }
@@ -732,12 +853,12 @@ class _GameScreenState extends State<GameScreen> {
 
     setState(() => _isReportingMissingHeart = true);
     context.read<GameBloc>().add(
-          SuitCheckNextRoundRequested(
-            roomId: widget.roomId,
-            uid: uid,
-            players: players,
-          ),
-        );
+      SuitCheckNextRoundRequested(
+        roomId: widget.roomId,
+        uid: uid,
+        players: players,
+      ),
+    );
     if (mounted) setState(() => _isReportingMissingHeart = false);
   }
 
@@ -758,12 +879,12 @@ class _GameScreenState extends State<GameScreen> {
 
     setState(() => _isReportingMissingSuit = true);
     context.read<GameBloc>().add(
-          MissingSuitReported(
-            roomId: widget.roomId,
-            uid: uid,
-            playerName: playerName,
-          ),
-        );
+      MissingSuitReported(
+        roomId: widget.roomId,
+        uid: uid,
+        playerName: playerName,
+      ),
+    );
     if (mounted) setState(() => _isReportingMissingSuit = false);
   }
 
@@ -889,18 +1010,168 @@ class _GameScreenState extends State<GameScreen> {
 
     setState(() => _isPlayingCard = true);
 
-    // ✅ Animation: কার্ডটি হাত থেকে (নিচ থেকে) শুরু হয়ে টেবিলে Slide/Fly করবে
-    _showCardFlyAnimation(card);
-
     context.read<GameBloc>().add(
-          CardPlayed(roomId: widget.roomId, uid: uid, card: card),
-        );
+      CardPlayed(roomId: widget.roomId, uid: uid, card: card),
+    );
     HapticFeedback.mediumImpact();
     if (mounted) setState(() => _isPlayingCard = false);
   }
 
   // ✅ Card Fly Animation (নিচ থেকে শুরু → টেবিলে)
-  void _showCardFlyAnimation(Map<String, dynamic> card) {
+  void _syncTableAnimations({
+    required List<Map<String, dynamic>> tableCards,
+    required String trickWinner,
+    required List<Map<String, dynamic>> players,
+    required String myUid,
+  }) {
+    final currentKeys = tableCards.map(_tableCardKey).toSet();
+    if (!_tableAnimationStateReady) {
+      _animatedTableCards.addAll(currentKeys);
+      _visibleTableCards.addAll(currentKeys);
+      _animatedTrickKey = _trickKey(tableCards, trickWinner);
+      _tableAnimationStateReady = true;
+      return;
+    }
+
+    for (final entry in tableCards) {
+      final key = _tableCardKey(entry);
+      if (_animatedTableCards.add(key)) {
+        final card = Map<String, dynamic>.from(entry['card'] ?? {});
+        final uid = entry['uid']?.toString() ?? '';
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _showCardFlyAnimation(
+            card,
+            start: _seatOffset(uid, players, myUid),
+            end: _boardCardOffset(uid, players, myUid),
+            onComplete: () {
+              if (!mounted) return;
+              setState(() => _visibleTableCards.add(key));
+            },
+          );
+        });
+      }
+    }
+
+    final trickKey = _trickKey(tableCards, trickWinner);
+    if (trickWinner.isNotEmpty &&
+        tableCards.length == players.length &&
+        trickKey != _animatedTrickKey) {
+      _animatedTrickKey = trickKey;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        Future<void>.delayed(const Duration(milliseconds: 720), () {
+          if (!mounted) return;
+          setState(() => _isCollectingTrick = true);
+          for (var index = 0; index < tableCards.length; index++) {
+            final card = Map<String, dynamic>.from(
+              tableCards[index]['card'] ?? {},
+            );
+            _showCardFlyAnimation(
+              card,
+              start: _tableCenterOffset(index: index),
+              end: _seatOffset(trickWinner, players, myUid),
+              duration: const Duration(milliseconds: 450),
+            );
+          }
+        });
+      });
+    }
+
+    _animatedTableCards.removeWhere((key) => !currentKeys.contains(key));
+    _visibleTableCards.removeWhere((key) => !currentKeys.contains(key));
+    if (currentKeys.isEmpty && trickWinner.isEmpty && _isCollectingTrick) {
+      _isCollectingTrick = false;
+    }
+  }
+
+  String _tableCardKey(Map<String, dynamic> entry) {
+    final card = entry['card'] is Map
+        ? Map<String, dynamic>.from(entry['card'] as Map)
+        : <String, dynamic>{};
+    return '${entry['uid']}:${card['rank']}:${card['suit']}';
+  }
+
+  String _trickKey(List<Map<String, dynamic>> cards, String winner) {
+    return '$winner|${cards.map(_tableCardKey).join('|')}';
+  }
+
+  Offset _tableCenterOffset({int index = 0}) {
+    final size = MediaQuery.of(context).size;
+    final spread = (index - 1.5) * 12;
+    return Offset(size.width / 2 + spread, size.height / 2);
+  }
+
+  Offset _boardCardOffset(
+    String targetUid,
+    List<Map<String, dynamic>> players,
+    String myUid,
+  ) {
+    final size = MediaQuery.of(context).size;
+    final isSmallScreen = size.width < 600;
+    final padding = isSmallScreen ? 8.0 : 16.0;
+    final cardWidth = isSmallScreen ? 50.0 : 66.0;
+    final cardHeight = isSmallScreen ? 70.0 : 92.0;
+    final sideInset = isSmallScreen ? 48.0 : 150.0;
+    final verticalInset = isSmallScreen ? 8.0 : 45.0;
+    final myIndex = players.indexWhere((p) => p['uid']?.toString() == myUid);
+    final targetIndex = players.indexWhere(
+      (p) => p['uid']?.toString() == targetUid,
+    );
+    final relative = myIndex < 0 || targetIndex < 0
+        ? 0
+        : (targetIndex - myIndex + players.length) % players.length;
+
+    switch (relative) {
+      case 1:
+        return Offset(
+          size.width - padding - sideInset - cardWidth / 2,
+          size.height / 2,
+        );
+      case 2:
+        return Offset(size.width / 2, padding + verticalInset + cardHeight / 2);
+      case 3:
+        return Offset(padding + sideInset + cardWidth / 2, size.height / 2);
+      default:
+        return Offset(
+          size.width / 2,
+          size.height - padding - verticalInset - cardHeight / 2,
+        );
+    }
+  }
+
+  Offset _seatOffset(
+    String targetUid,
+    List<Map<String, dynamic>> players,
+    String myUid,
+  ) {
+    final size = MediaQuery.of(context).size;
+    final myIndex = players.indexWhere((p) => p['uid']?.toString() == myUid);
+    final targetIndex = players.indexWhere(
+      (p) => p['uid']?.toString() == targetUid,
+    );
+    final relative = myIndex < 0 || targetIndex < 0
+        ? 0
+        : (targetIndex - myIndex + players.length) % players.length;
+    switch (relative) {
+      case 1:
+        return Offset(size.width - 78, size.height / 2);
+      case 2:
+        return Offset(size.width / 2, 78);
+      case 3:
+        return Offset(78, size.height / 2);
+      default:
+        return Offset(size.width / 2, size.height - 92);
+    }
+  }
+
+  void _showCardFlyAnimation(
+    Map<String, dynamic> card, {
+    required Offset start,
+    required Offset end,
+    Duration duration = const Duration(milliseconds: 360),
+    VoidCallback? onComplete,
+  }) {
     final overlay = Overlay.of(context);
 
     late final OverlayEntry overlayEntry;
@@ -908,13 +1179,30 @@ class _GameScreenState extends State<GameScreen> {
     overlayEntry = OverlayEntry(
       builder: (context) => _FlyingCardOverlay(
         card: card,
+        start: start,
+        end: end,
+        duration: duration,
         onComplete: () {
           overlayEntry.remove();
+          onComplete?.call();
         },
       ),
     );
 
     overlay.insert(overlayEntry);
+  }
+
+  void _syncPresence(List<Map<String, dynamic>> players, String uid) {
+    if (uid.isEmpty) return;
+
+    final player = players.firstWhere(
+      (entry) => entry['uid']?.toString() == uid,
+      orElse: () => <String, dynamic>{},
+    );
+    final name = player['name']?.toString() ?? '';
+    if (name.isEmpty) return;
+
+    _presenceService.start(roomId: widget.roomId, uid: uid, name: name);
   }
 
   List<Map<String, dynamic>> _normalizePlayers(dynamic raw) => raw is List
@@ -969,63 +1257,211 @@ class _PlayerCornerCard extends StatelessWidget {
     required this.point,
     this.isMe = false,
     this.isSmallScreen = false,
+    this.isOnline,
   });
+
   final Map<String, dynamic>? player;
   final String name;
   final bool isTurn;
   final int bid, tricks, point;
   final bool isMe;
   final bool isSmallScreen;
+  final bool? isOnline;
 
   @override
   Widget build(BuildContext context) {
+    final avatar = player?['avatar']?.toString();
+    final initials = name.trim().isEmpty
+        ? '?'
+        : name.trim().substring(0, 1).toUpperCase();
+
+    final avatarSize = isSmallScreen ? 32.0 : 48.0;
+
     return AnimatedContainer(
       duration: const Duration(milliseconds: 280),
+      width: isSmallScreen ? 116 : 148,
       padding: EdgeInsets.symmetric(
-        horizontal: isSmallScreen ? 4 : 6,
-        vertical: isSmallScreen ? 2 : 3,
+        horizontal: isSmallScreen ? 5 : 7,
+        vertical: isSmallScreen ? 4 : 6,
       ),
       decoration: BoxDecoration(
-        gradient: _panelGrad,
-        borderRadius: BorderRadius.circular(8),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: isTurn
+              ? const [Color(0xFFFFECA6), Color(0xFFE0A32D), Color(0xFF8D4E13)]
+              : const [Color(0xFF123E70), Color(0xFF071D3A), Color(0xFF031326)],
+        ),
+        borderRadius: BorderRadius.circular(13),
         border: Border.all(
-          color: isTurn ? _C.goldLight : _C.goldDark,
+          color: isTurn ? _C.goldLight : const Color(0xFFD49A32),
           width: isTurn ? 2 : 1,
         ),
-        boxShadow: isTurn
-            ? [BoxShadow(color: _C.goldLight.withOpacity(.3), blurRadius: 8)]
-            : [],
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(.65),
+            blurRadius: 9,
+            offset: const Offset(0, 4),
+          ),
+          if (isTurn)
+            BoxShadow(
+              color: _C.goldLight.withOpacity(.42),
+              blurRadius: 14,
+              spreadRadius: 1,
+            ),
+        ],
       ),
-      child: Column(
+      child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _Nameplate(
-            name: isMe ? 'You' : name,
-            isTurn: isTurn,
-            isSmallScreen: isSmallScreen,
-          ),
-          SizedBox(height: isSmallScreen ? 2 : 3),
-          _BidTricksBar(tricks: tricks, bid: bid, isSmallScreen: isSmallScreen),
-          SizedBox(height: isSmallScreen ? 2 : 3),
-          _PointDisplay(point: point, isSmallScreen: isSmallScreen),
-          if (isTurn) ...[
-            SizedBox(height: isSmallScreen ? 2 : 3),
-            Container(
-              padding: EdgeInsets.symmetric(horizontal: 3, vertical: 0),
-              decoration: BoxDecoration(
-                color: _C.goldLight,
-                borderRadius: BorderRadius.circular(4),
+          // Realistic-looking avatar frame.
+          Container(
+            width: avatarSize,
+            height: avatarSize,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: const RadialGradient(
+                colors: [
+                  Color(0xFF6B8EAA),
+                  Color(0xFF152A42),
+                  Color(0xFF050B13),
+                ],
               ),
-              child: Text(
-                'TURN',
-                style: TextStyle(
-                  color: _C.black,
-                  fontSize: isSmallScreen ? 5 : 7,
-                  fontWeight: FontWeight.w900,
+              border: Border.all(
+                color: isTurn ? _C.goldLight : const Color(0xFFD5A83C),
+                width: isTurn ? 2 : 1.5,
+              ),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black87,
+                  blurRadius: 7,
+                  offset: Offset(0, 3),
                 ),
-              ),
+              ],
             ),
-          ],
+            child: isOnline == false
+                ? const Center(
+                    child: PlayerPresenceIndicator(isOnline: false),
+                  )
+                : ClipOval(
+                    child: avatar != null && avatar.isNotEmpty
+                        ? Image.asset(
+                            avatar,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) =>
+                                _AvatarPlaceholder(initials: initials),
+                          )
+                        : _AvatarPlaceholder(initials: initials),
+                  ),
+          ),
+
+
+          SizedBox(width: isSmallScreen ? 5 : 8),
+
+          Flexible(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  constraints: BoxConstraints(
+                    maxWidth: isSmallScreen ? 58 : 76,
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 5,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    gradient: isTurn ? _goldGrad : _panelGrad,
+                    borderRadius: BorderRadius.circular(5),
+                    border: Border.all(
+                      color: isTurn ? _C.goldLight : _C.goldDark,
+                    ),
+                  ),
+                  child: Text(
+                    isMe ? 'YOU' : name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: isTurn ? Colors.black : Colors.white,
+                      fontSize: isSmallScreen ? 8 : 10,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _BidTricksBar(
+                      tricks: tricks,
+                      bid: bid,
+                      isSmallScreen: isSmallScreen,
+                    ),
+                    const SizedBox(width: 3),
+                    _PointDisplay(point: point, isSmallScreen: isSmallScreen),
+                  ],
+                ),
+                if (isTurn)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 5,
+                          height: 5,
+                          decoration: const BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.greenAccent,
+                          ),
+                        ),
+                        const SizedBox(width: 3),
+                        Text(
+                          'YOUR TURN',
+                          style: TextStyle(
+                            color: Colors.black,
+                            fontSize: isSmallScreen ? 5 : 6,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          
+        ],
+      ),
+    );
+  }
+}
+
+class _AvatarPlaceholder extends StatelessWidget {
+  const _AvatarPlaceholder({required this.initials});
+
+  final String initials;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFF526D86), Color(0xFF172B42)],
+        ),
+      ),
+      alignment: Alignment.center,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Icon(
+            Icons.person_rounded,
+            size: 40,
+            color: Colors.white.withOpacity(.72),
+          ),
         ],
       ),
     );
@@ -1079,13 +1515,16 @@ class _FeltTable extends StatelessWidget {
   const _FeltTable({
     required this.players,
     required this.tableCards,
+    required this.visibleTableCardKeys,
     required this.currentTurn,
     required this.myUid,
     required this.trickWinner,
     this.isSmallScreen = false,
   });
+
   final List<Map<String, dynamic>> players;
   final List<Map<String, dynamic>> tableCards;
+  final Set<String> visibleTableCardKeys;
   final String currentTurn, myUid;
   final String trickWinner;
   final bool isSmallScreen;
@@ -1095,107 +1534,208 @@ class _FeltTable extends StatelessWidget {
     final seatCards = <String, Map<String, dynamic>>{};
     for (final e in tableCards) {
       final u = e['uid']?.toString() ?? '';
-      if (u.isNotEmpty)
-        seatCards[u] = Map<String, dynamic>.from(e['card'] ?? {});
+      final card = e['card'] is Map
+          ? Map<String, dynamic>.from(e['card'] as Map)
+          : <String, dynamic>{};
+      final cardKey = '${e['uid']}:${card['rank']}:${card['suit']}';
+      if (u.isNotEmpty && visibleTableCardKeys.contains(cardKey)) {
+        seatCards[u] = card;
+      }
     }
 
     final myIndex = players.indexWhere((p) => p['uid']?.toString() == myUid);
     final total = players.length;
-    String uidAt(int rel) => total == 0
-        ? ''
-        : players[(myIndex + rel) % total]['uid']?.toString() ?? '';
+
+    String uidAt(int rel) {
+      if (total == 0 || myIndex < 0) return '';
+      return players[(myIndex + rel) % total]['uid']?.toString() ?? '';
+    }
 
     final topUid = uidAt(2);
     final leftUid = uidAt(3);
     final rightUid = uidAt(1);
 
+    final sideInset = isSmallScreen ? 48.0 : 250.0;
+    final verticalInset = isSmallScreen ? 8.0 : 45.0;
+
     return Container(
       decoration: BoxDecoration(
-        gradient: const RadialGradient(
-          colors: [Color(0xFF163C5A), Color(0xFF081A2B)],
-          radius: 0.9,
+        borderRadius: BorderRadius.circular(999),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFFFFD778),
+            Color(0xFFC47A25),
+            Color(0xFF6D3212),
+            Color(0xFFB96A1D),
+            Color(0xFFFFD978),
+          ],
+          stops: [0, .20, .50, .78, 1],
         ),
-        borderRadius: BorderRadius.circular(isSmallScreen ? 10 : 16),
-        border: Border.all(color: _C.gold, width: isSmallScreen ? 1.5 : 2),
-        boxShadow: [BoxShadow(color: _C.gold.withOpacity(.15), blurRadius: 20)],
-      ),
-      child: Stack(
-        children: [
-          Center(
-            child: Opacity(
-              opacity: 0.05,
-              child: Text(
-                '♠',
-                style: TextStyle(
-                  fontSize: isSmallScreen ? 80 : 120,
-                  color: _C.white,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
+        border: Border.all(
+          color: const Color(0xFFFFE8A4),
+          width: isSmallScreen ? 2 : 3,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(.72),
+            blurRadius: 26,
+            spreadRadius: 2,
+            offset: const Offset(0, 10),
           ),
-          // Table Cards (Serial Order অনুযায়ী)
-          // Top Card
-          Positioned(
-            top: isSmallScreen ? 20 : 40,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: _TableCardSlot(
-                card: seatCards[topUid],
-                label: nameAt(2),
-                isTurn: currentTurn == topUid,
-                isWinner: trickWinner == topUid,
-                isSmallScreen: isSmallScreen,
-              ),
-            ),
-          ),
-          // Left Card
-          Positioned(
-            left: isSmallScreen ? 40 : 200,
-            top: 0,
-            bottom: 0,
-            child: Center(
-              child: _TableCardSlot(
-                card: seatCards[leftUid],
-                label: nameAt(3),
-                isTurn: currentTurn == leftUid,
-                isWinner: trickWinner == leftUid,
-                isSmallScreen: isSmallScreen,
-              ),
-            ),
-          ),
-          // Right Card
-          Positioned(
-            right: isSmallScreen ? 40 : 200,
-            top: 0,
-            bottom: 0,
-            child: Center(
-              child: _TableCardSlot(
-                card: seatCards[rightUid],
-                label: nameAt(1),
-                isTurn: currentTurn == rightUid,
-                isWinner: trickWinner == rightUid,
-                isSmallScreen: isSmallScreen,
-              ),
-            ),
-          ),
-          // Bottom Card (You)
-          Positioned(
-            bottom: isSmallScreen ? 20 : 70,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: _TableCardSlot(
-                card: seatCards[myUid],
-                label: 'You',
-                isTurn: currentTurn == myUid,
-                isWinner: trickWinner == myUid,
-                isSmallScreen: isSmallScreen,
-              ),
-            ),
+          BoxShadow(
+            color: const Color(0xFFFFD66B).withOpacity(.18),
+            blurRadius: 14,
+            spreadRadius: 1,
           ),
         ],
+      ),
+      child: CustomPaint(
+        painter: _WoodGrainPainter(),
+        child: Padding(
+          padding: EdgeInsets.all(isSmallScreen ? 5 : 9),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(999),
+              gradient: const RadialGradient(
+                center: Alignment(0, -.18),
+                radius: 1.15,
+                colors: [
+                  Color(0xFFD9414F),
+                  Color(0xFFB71F31),
+                  Color(0xFF781426),
+                  Color(0xFF430D1B),
+                ],
+                stops: [0, .36, .72, 1],
+              ),
+              border: Border.all(
+                color: const Color(0xFFFFA0A5).withOpacity(.55),
+                width: 1.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(.65),
+                  blurRadius: 16,
+                  offset: const Offset(0, 5),
+                ),
+                BoxShadow(
+                  color: Colors.redAccent.withOpacity(.10),
+                  blurRadius: 22,
+                  spreadRadius: 4,
+                ),
+              ],
+            ),
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: CustomPaint(painter: _FeltMarkingsPainter()),
+                ),
+
+                // Soft table reflection.
+                Align(
+                  alignment: const Alignment(0, -.55),
+                  child: IgnorePointer(
+                    child: Container(
+                      width: double.infinity,
+                      height: isSmallScreen ? 32 : 70,
+                      margin: const EdgeInsets.symmetric(horizontal: 80),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(100),
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Colors.white.withOpacity(.09),
+                            Colors.white.withOpacity(0),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+
+                Center(
+                  child: Opacity(
+                    opacity: .045,
+                    child: Text(
+                      '♠',
+                      style: TextStyle(
+                        fontSize: isSmallScreen ? 80 : 150,
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+
+                // Top played card.
+                Positioned(
+                  top: verticalInset,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: _TableCardSlot(
+                      card: seatCards[topUid],
+                      label: nameAt(2),
+                      isTurn: currentTurn == topUid,
+                      isWinner: trickWinner == topUid,
+                      isSmallScreen: isSmallScreen,
+                    ),
+                  ),
+                ),
+
+                // Left played card.
+                Positioned(
+                  left: sideInset,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: _TableCardSlot(
+                      card: seatCards[leftUid],
+                      label: nameAt(3),
+                      isTurn: currentTurn == leftUid,
+                      isWinner: trickWinner == leftUid,
+                      isSmallScreen: isSmallScreen,
+                    ),
+                  ),
+                ),
+
+                // Right played card.
+                Positioned(
+                  right: sideInset,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: _TableCardSlot(
+                      card: seatCards[rightUid],
+                      label: nameAt(1),
+                      isTurn: currentTurn == rightUid,
+                      isWinner: trickWinner == rightUid,
+                      isSmallScreen: isSmallScreen,
+                    ),
+                  ),
+                ),
+
+                // My played card.
+                Positioned(
+                  bottom: verticalInset,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: _TableCardSlot(
+                      card: seatCards[myUid],
+                      label: 'You',
+                      isTurn: currentTurn == myUid,
+                      isWinner: trickWinner == myUid,
+                      isSmallScreen: isSmallScreen,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1203,9 +1743,81 @@ class _FeltTable extends StatelessWidget {
   String nameAt(int rel) {
     if (players.isEmpty) return 'Player';
     final myIndex = players.indexWhere((p) => p['uid']?.toString() == myUid);
+    if (myIndex < 0) return 'Player';
     final abs = (myIndex + rel) % players.length;
     return players[abs]['name']?.toString() ?? 'Player';
   }
+}
+
+class _WoodGrainPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final grain = Paint()
+      ..color = const Color(0x66FFE39A)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2;
+    final shadowGrain = Paint()
+      ..color = const Color(0x331E0903)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.2;
+
+    for (var index = 0; index < 5; index++) {
+      final inset = 16.0 + (index * 7.0);
+      final rect = Rect.fromLTWH(
+        inset,
+        inset * .45,
+        size.width - inset * 2,
+        size.height - inset * .9,
+      );
+      canvas.drawOval(rect, shadowGrain);
+      canvas.drawOval(rect.deflate(2), grain);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class _FeltMarkingsPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rail = Paint()
+      ..color = const Color(0x55FFD98A)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2;
+    final shade = Paint()
+      ..color = const Color(0x331B0610)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+
+    final inset = size.width * .08;
+    canvas.drawOval(
+      Rect.fromLTWH(
+        inset,
+        size.height * .1,
+        size.width - inset * 2,
+        size.height * .8,
+      ),
+      shade,
+    );
+    canvas.drawOval(
+      Rect.fromLTWH(
+        inset + 3,
+        size.height * .1 + 3,
+        size.width - inset * 2 - 6,
+        size.height * .8 - 6,
+      ),
+      rail,
+    );
+    canvas.drawLine(
+      Offset(size.width * .25, size.height * .5),
+      Offset(size.width * .75, size.height * .5),
+      rail,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _TableCardSlot extends StatelessWidget {
@@ -1216,6 +1828,7 @@ class _TableCardSlot extends StatelessWidget {
     required this.isWinner,
     this.isSmallScreen = false,
   });
+
   final Map<String, dynamic>? card;
   final String label;
   final bool isTurn;
@@ -1224,27 +1837,29 @@ class _TableCardSlot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final double cardW = isSmallScreen ? 48.0 : 60.0;
-    final double cardH = isSmallScreen ? 68.0 : 86.0;
+    final cardW = isSmallScreen ? 50.0 : 66.0;
+    final cardH = isSmallScreen ? 70.0 : 92.0;
 
     if (card == null) {
-      return Container(
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
         width: cardW,
         height: cardH,
         decoration: BoxDecoration(
-          color: isTurn ? Colors.white.withOpacity(0.1) : Colors.transparent,
+          color: Colors.black.withOpacity(.08),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
-            color: isTurn ? _C.goldLight : _C.white20,
+            color: isTurn ? _C.goldLight : Colors.white.withOpacity(.10),
             width: isTurn ? 2 : 1,
           ),
         ),
         alignment: Alignment.center,
         child: Text(
-          label,
+          isTurn ? 'YOUR TURN' : '',
           style: TextStyle(
-            color: isTurn ? _C.goldLight : _C.white50,
-            fontSize: isSmallScreen ? 8 : 10,
+            color: _C.goldLight,
+            fontSize: isSmallScreen ? 6 : 8,
+            fontWeight: FontWeight.w900,
           ),
         ),
       );
@@ -1253,105 +1868,139 @@ class _TableCardSlot extends StatelessWidget {
     final suit = card!['suit']?.toString() ?? '';
     final rank = card!['rank']?.toString() ?? '';
     final isRed = suit == '♥' || suit == '♦';
-    final suitColor = isRed ? _C.red : _C.black;
+    final suitColor = isRed ? const Color(0xFFD7192E) : Colors.black87;
 
-    // Winner হলে Gold Glow Effect
-    final borderColor = isWinner
-        ? Colors.greenAccent
-        : (isTurn ? _C.goldLight : _C.goldDark);
-    final boxShadow = isWinner
-        ? [
-            BoxShadow(
-              color: Colors.greenAccent.withOpacity(0.5),
-              blurRadius: 16,
-              offset: const Offset(0, 4),
-            ),
-          ]
-        : const [
-            BoxShadow(
-              color: Colors.black45,
-              blurRadius: 6,
-              offset: Offset(0, 3),
-            ),
-          ];
-
-    return Container(
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
       width: cardW,
       height: cardH,
       decoration: BoxDecoration(
-        color: _C.white,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: borderColor, width: isWinner ? 3 : 1),
-        boxShadow: boxShadow,
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Colors.white, Color(0xFFF2F2F2), Color(0xFFD9D9D9)],
+        ),
+        border: Border.all(
+          color: isWinner
+              ? Colors.greenAccent
+              : isTurn
+              ? _C.goldLight
+              : const Color(0xFFB98B37),
+          width: isWinner || isTurn ? 2.5 : 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(.70),
+            blurRadius: 8,
+            offset: const Offset(2, 5),
+          ),
+          if (isWinner)
+            BoxShadow(
+              color: Colors.greenAccent.withOpacity(.45),
+              blurRadius: 15,
+            ),
+        ],
       ),
       child: Stack(
         children: [
-          Positioned(
-            top: 2,
-            left: 3,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  rank,
-                  style: TextStyle(
-                    fontSize: isSmallScreen ? 10 : 14,
-                    fontWeight: FontWeight.w900,
-                    color: suitColor,
-                    height: 1.0,
-                  ),
+          Positioned.fill(
+            child: Padding(
+              padding: const EdgeInsets.all(2),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: Colors.black.withOpacity(.08)),
                 ),
-                Text(
-                  suit,
-                  style: TextStyle(
-                    fontSize: isSmallScreen ? 12 : 16,
-                    color: suitColor,
-                    height: 1.0,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Positioned(
-            bottom: 2,
-            right: 3,
-            child: RotatedBox(
-              quarterTurns: 2,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    rank,
-                    style: TextStyle(
-                      fontSize: isSmallScreen ? 10 : 14,
-                      fontWeight: FontWeight.w900,
-                      color: suitColor,
-                      height: 1.0,
-                    ),
-                  ),
-                  Text(
-                    suit,
-                    style: TextStyle(
-                      fontSize: isSmallScreen ? 12 : 16,
-                      color: suitColor,
-                      height: 1.0,
-                    ),
-                  ),
-                ],
               ),
             ),
           ),
+
+          Positioned(
+            top: 4,
+            left: 5,
+            child: _CardCorner(
+              rank: rank,
+              suit: suit,
+              color: suitColor,
+              small: isSmallScreen,
+            ),
+          ),
+
           Center(
-            child: Text(
-              suit,
-              style: TextStyle(
-                fontSize: isSmallScreen ? 24 : 36,
+            child: rank == 'K'
+                ? Text(
+                    'K',
+                    style: TextStyle(
+                      color: suitColor,
+                      fontSize: isSmallScreen ? 28 : 36,
+                      fontWeight: FontWeight.w900,
+                      shadows: const [
+                        Shadow(color: Colors.black12, blurRadius: 2),
+                      ],
+                    ),
+                  )
+                : Text(
+                    suit,
+                    style: TextStyle(
+                      color: suitColor,
+                      fontSize: isSmallScreen ? 30 : 43,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+          ),
+
+          Positioned(
+            bottom: 4,
+            right: 5,
+            child: RotatedBox(
+              quarterTurns: 2,
+              child: _CardCorner(
+                rank: rank,
+                suit: suit,
                 color: suitColor,
+                small: isSmallScreen,
               ),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class _CardCorner extends StatelessWidget {
+  const _CardCorner({
+    required this.rank,
+    required this.suit,
+    required this.color,
+    required this.small,
+  });
+
+  final String rank;
+  final String suit;
+  final Color color;
+  final bool small;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          rank,
+          style: TextStyle(
+            color: color,
+            fontSize: small ? 11 : 15,
+            height: .9,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        Text(
+          suit,
+          style: TextStyle(color: color, fontSize: small ? 12 : 16, height: .9),
+        ),
+      ],
     );
   }
 }
@@ -1364,6 +2013,7 @@ class _MyHand extends StatelessWidget {
     required this.isSmallScreen,
     required this.onCardTap,
   });
+
   final List<Map<String, dynamic>> cards;
   final bool isMyTurn;
   final bool isSmallScreen;
@@ -1373,27 +2023,22 @@ class _MyHand extends StatelessWidget {
   Widget build(BuildContext context) {
     if (cards.isEmpty) return const SizedBox(height: 40);
 
-    // ✅ কার্ডের সাইজ বড় করুন
-    final double cardW = isSmallScreen ? 56.0 : 80.0;
-    final double cardH = isSmallScreen ? 72.0 : 100.0;
-    final double fontSize = isSmallScreen ? 12.0 : 16.0;
-    final double suitSize = isSmallScreen ? 16.0 : 22.0;
-    final double bigSuitSize = isSmallScreen ? 36.0 : 48.0;
-
-    // ✅ কার্ডের স্পেস বাড়ান
-    final double visibleHeight = isSmallScreen ? 36.0 : 50.0;
+    final cardW = isSmallScreen ? 58.0 : 82.0;
+    final cardH = isSmallScreen ? 76.0 : 112.0;
 
     return SizedBox(
-      height: visibleHeight,
+      height: isSmallScreen ? 58 : 82,
       width: double.infinity,
       child: LayoutBuilder(
         builder: (ctx, constraints) {
+          final maxSpread = constraints.maxWidth * .56;
           final spacing = cards.length > 1
-              ? ((constraints.maxWidth * .7) / (cards.length - 1)).clamp(
-                  isSmallScreen ? 10.0 : 14.0,
-                  isSmallScreen ? 24.0 : 46.0,
+              ? (maxSpread / (cards.length - 1)).clamp(
+                  isSmallScreen ? 18.0 : 22.0,
+                  isSmallScreen ? 32.0 : 48.0,
                 )
               : 0.0;
+
           final handWidth = cardW + ((cards.length - 1) * spacing);
           final startLeft = (constraints.maxWidth - handWidth) / 2;
 
@@ -1404,106 +2049,136 @@ class _MyHand extends StatelessWidget {
               final suit = card['suit']?.toString() ?? '';
               final rank = card['rank']?.toString() ?? '';
               final isRed = suit == '♥' || suit == '♦';
-              final suitColor = isRed ? _C.red : _C.black;
-              final angle = (i - cards.length / 2) * 0.01;
+              final suitColor = isRed
+                  ? const Color(0xFFD7192E)
+                  : Colors.black87;
+
+              final center = (cards.length - 1) / 2;
+              final curve = i - center;
+              final angle = curve * .018;
 
               return Positioned(
-                left: startLeft + (i * spacing),
-                bottom: isSmallScreen ? 2.0 : -15,
+                left: startLeft + i * spacing,
+                bottom: isSmallScreen ? -3 : -23,
                 child: GestureDetector(
-                  // ✅ Behavior: HitTestBehavior.opaque - পুরো কার্ডের উপর ক্লিক কাজ করবে
                   behavior: HitTestBehavior.opaque,
                   onTap: isMyTurn ? () => onCardTap(card) : null,
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 180),
-                    width: cardW,
-                    height: cardH,
-                    transform: Matrix4.rotationZ(angle),
-                    transformAlignment: Alignment.bottomCenter,
-                    decoration: BoxDecoration(
-                      color: _C.white,
-                      borderRadius: BorderRadius.circular(
-                        isSmallScreen ? 6.0 : 8.0,
-                      ),
-                      border: Border.all(
-                        color: isMyTurn ? _C.goldDark : Colors.grey,
-                        width: isMyTurn ? 2.0 : 1.0,
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black38,
-                          blurRadius: 6.0,
-                          offset: const Offset(0, 3),
+                  child: Transform.rotate(
+                    angle: angle,
+                    alignment: Alignment.bottomCenter,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      width: cardW,
+                      height: cardH,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        gradient: const LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            Colors.white,
+                            Color(0xFFF7F7F7),
+                            Color(0xFFD7D7D7),
+                          ],
                         ),
-                      ],
-                    ),
-                    child: Stack(
-                      children: [
-                        Positioned(
-                          top: 3,
-                          left: 4,
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                rank,
-                                style: TextStyle(
-                                  fontSize: fontSize,
-                                  fontWeight: FontWeight.w900,
-                                  color: suitColor,
-                                  height: 1.0,
-                                ),
-                              ),
-                              Text(
-                                suit,
-                                style: TextStyle(
-                                  fontSize: suitSize,
-                                  color: suitColor,
-                                  height: 1.0,
-                                ),
-                              ),
-                            ],
+                        border: Border.all(
+                          color: isMyTurn
+                              ? _C.goldLight
+                              : const Color(0xFF9B9B9B),
+                          width: isMyTurn ? 2 : 1,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(.68),
+                            blurRadius: 8,
+                            offset: const Offset(1, 5),
                           ),
-                        ),
-                        Positioned(
-                          bottom: 3,
-                          right: 4,
-                          child: RotatedBox(
-                            quarterTurns: 2,
+                        ],
+                      ),
+                      child: Stack(
+                        children: [
+                          Positioned.fill(
+                            child: Padding(
+                              padding: const EdgeInsets.all(2),
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(
+                                    color: Colors.black.withOpacity(.07),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+
+                          Positioned(
+                            top: 4,
+                            left: 5,
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
                                   rank,
                                   style: TextStyle(
-                                    fontSize: fontSize,
+                                    fontSize: isSmallScreen ? 13 : 17,
+                                    height: .9,
                                     fontWeight: FontWeight.w900,
                                     color: suitColor,
-                                    height: 1.0,
                                   ),
                                 ),
                                 Text(
                                   suit,
                                   style: TextStyle(
-                                    fontSize: suitSize,
+                                    fontSize: isSmallScreen ? 15 : 20,
+                                    height: .9,
                                     color: suitColor,
-                                    height: 1.0,
                                   ),
                                 ),
                               ],
                             ),
                           ),
-                        ),
-                        Center(
-                          child: Text(
-                            suit,
-                            style: TextStyle(
-                              fontSize: bigSuitSize,
-                              color: suitColor,
+
+                          Center(
+                            child: Text(
+                              suit,
+                              style: TextStyle(
+                                fontSize: isSmallScreen ? 36 : 51,
+                                color: suitColor,
+                              ),
                             ),
                           ),
-                        ),
-                      ],
+
+                          Positioned(
+                            bottom: 4,
+                            right: 5,
+                            child: RotatedBox(
+                              quarterTurns: 2,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    rank,
+                                    style: TextStyle(
+                                      fontSize: isSmallScreen ? 13 : 17,
+                                      height: .9,
+                                      fontWeight: FontWeight.w900,
+                                      color: suitColor,
+                                    ),
+                                  ),
+                                  Text(
+                                    suit,
+                                    style: TextStyle(
+                                      fontSize: isSmallScreen ? 15 : 20,
+                                      height: .9,
+                                      color: suitColor,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -1516,13 +2191,21 @@ class _MyHand extends StatelessWidget {
   }
 }
 
-
 // ── Flying Card Overlay (Card Play Animation) ─────────────────────────────────
 class _FlyingCardOverlay extends StatefulWidget {
   final Map<String, dynamic> card;
+  final Offset start;
+  final Offset end;
+  final Duration duration;
   final VoidCallback onComplete;
 
-  const _FlyingCardOverlay({required this.card, required this.onComplete});
+  const _FlyingCardOverlay({
+    required this.card,
+    required this.start,
+    required this.end,
+    required this.onComplete,
+    this.duration = const Duration(milliseconds: 360),
+  });
 
   @override
   State<_FlyingCardOverlay> createState() => _FlyingCardOverlayState();
@@ -1542,10 +2225,7 @@ class _FlyingCardOverlayState extends State<_FlyingCardOverlay>
   void initState() {
     super.initState();
 
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 250), // ✅ দ্রুত Animation (250ms)
-    );
+    _controller = AnimationController(vsync: this, duration: widget.duration);
   }
 
   @override
@@ -1557,10 +2237,9 @@ class _FlyingCardOverlayState extends State<_FlyingCardOverlay>
     if (_screenSize != size) {
       _screenSize = size;
 
-      // ✅ Animation শুরুর অবস্থান: নিচে (হাত) থেকে শুরু হবে
       _positionAnimation = Tween<Offset>(
-        begin: Offset(size.width / 2, size.height - 50), // Bottom (Hand)
-        end: Offset(size.width / 2, size.height / 2), // Center (Table)
+        begin: widget.start,
+        end: widget.end,
       ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
 
       _scaleAnimation = Tween<double>(
@@ -1574,7 +2253,6 @@ class _FlyingCardOverlayState extends State<_FlyingCardOverlay>
       ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
     }
 
-    // ✅ Animation শুরু করুন (প্রথমবার)
     if (!_controller.isAnimating && !_controller.isCompleted) {
       _controller.forward().whenComplete(() {
         widget.onComplete();
@@ -1675,6 +2353,114 @@ class _FlyingCardOverlayState extends State<_FlyingCardOverlay>
             ),
           ),
         );
+      },
+    );
+  }
+}
+
+class _DealAnimation extends StatefulWidget {
+  const _DealAnimation({required this.isSmallScreen, required this.onComplete});
+
+  final bool isSmallScreen;
+  final VoidCallback onComplete;
+
+  @override
+  State<_DealAnimation> createState() => _DealAnimationState();
+}
+
+class _DealAnimationState extends State<_DealAnimation>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 7200),
+    )..forward().whenComplete(widget.onComplete);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final cardWidth = widget.isSmallScreen ? 34.0 : 44.0;
+    final cardHeight = widget.isSmallScreen ? 50.0 : 66.0;
+    final center = Offset(size.width / 2, size.height * .48);
+    final destinations = [
+      Offset(size.width / 2, size.height * .16),
+      Offset(size.width * .84, size.height * .46),
+      Offset(size.width / 2, size.height * .78),
+      Offset(size.width * .16, size.height * .46),
+    ];
+
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final cards = <Widget>[];
+        for (var index = 0; index < 52; index++) {
+          final start = index * .012;
+          final end = start + .13;
+          final progress = ((_controller.value - start) / (end - start)).clamp(
+            0.0,
+            1.0,
+          );
+          if (progress <= 0 || progress >= 1) continue;
+
+          final destination = destinations[index % 4];
+          final position = Offset.lerp(
+            center,
+            destination,
+            Curves.easeOut.transform(progress),
+          )!;
+          final rotation = (index.isEven ? -1 : 1) * .12 * progress;
+
+          cards.add(
+            Positioned(
+              left: position.dx - cardWidth / 2,
+              top: position.dy - cardHeight / 2,
+              child: Transform.rotate(
+                angle: rotation,
+                child: Container(
+                  width: cardWidth,
+                  height: cardHeight,
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFFB83C4A), Color(0xFF671B2B)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: const Color(0xFFFFD66B)),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Colors.black54,
+                        blurRadius: 5,
+                        offset: Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    '♠',
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(.72),
+                      fontSize: widget.isSmallScreen ? 16 : 22,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
+
+        return Stack(children: cards);
       },
     );
   }

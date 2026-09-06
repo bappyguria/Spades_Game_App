@@ -8,8 +8,8 @@ import 'package:app/utils/app_orientation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'firebase_options.dart';
 
+import 'firebase_options.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -31,12 +31,8 @@ class MyApp extends StatelessWidget {
         BlocProvider<AuthBloc>(
           create: (context) => AuthBloc()..add(AuthInitialized()),
         ),
-        BlocProvider<RoomBloc>(
-          create: (context) => RoomBloc(),
-        ),
-        BlocProvider<GameBloc>(
-          create: (context) => GameBloc(),
-        ),
+        BlocProvider<RoomBloc>(create: (context) => RoomBloc()),
+        BlocProvider<GameBloc>(create: (context) => GameBloc()),
       ],
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
@@ -47,9 +43,7 @@ class MyApp extends StatelessWidget {
               return const Scaffold(
                 backgroundColor: Color(0xFF0A1628),
                 body: Center(
-                  child: CircularProgressIndicator(
-                    color: Color(0xFFD4A017),
-                  ),
+                  child: CircularProgressIndicator(color: Color(0xFFD4A017)),
                 ),
               );
             }

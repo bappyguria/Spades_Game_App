@@ -193,7 +193,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
           .update({
         'roomMessage': {
           'id': DateTime.now().microsecondsSinceEpoch.toString(),
-          'text': '${event.playerName} এর কাছে কার্ড নেই।',
+          'text': '${event.playerName} এর কাছে ১ কার্ড নেই।',
           'senderUid': event.uid,
         },
       });

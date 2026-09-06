@@ -15,7 +15,6 @@ dependencies:
   flutter_bloc: ^9.1.1
   equatable: ^2.0.7
   uuid:
-  flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.3
   rename_app:
 
@@ -30,6 +29,7 @@ flutter:
 
   assets:
     - assets/images/
+    - assets/sounds/
 
 
 

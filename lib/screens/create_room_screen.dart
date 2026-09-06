@@ -28,7 +28,6 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
 
   // Design Tokens (Same as JoinRoomScreen)
   static const Color bgBase = Color(0xFF0B1220);
-  static const Color bgElevated = Color(0xFF141D2E);
   static const Color bgSurface = Color(0xFF1B2740);
   static const Color accent = Color(0xFFE8A93B);
   static const Color accentSoft = Color(0xFFF3C877);
@@ -150,7 +149,28 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
     return Row(
       children: [
         _CircleIconButton(icon: Icons.arrow_back_ios_new_rounded, onTap: () => Navigator.pop(context)),
+        const SizedBox(width: 14),
+        const Text(
+          'NEW TABLE',
+          style: TextStyle(color: textSecondary, fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1.8),
+        ),
         const Spacer(),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0x143DBE7E),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: const Color(0x403DBE7E)),
+          ),
+          child: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.lock_outline_rounded, color: Color(0xFF3DBE7E), size: 13),
+              SizedBox(width: 5),
+              Text('PRIVATE', style: TextStyle(color: Color(0xFF3DBE7E), fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 1)),
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -190,10 +210,14 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
       width: double.infinity,
       padding: EdgeInsets.all(isSmall ? 20 : 26),
       decoration: BoxDecoration(
-        color: bgElevated,
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF1A263B), Color(0xFF111A2A)],
+        ),
         borderRadius: BorderRadius.circular(_radiusLg),
         border: Border.all(color: borderSubtle, width: 1),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.35), blurRadius: 28, offset: const Offset(0, 16))],
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.38), blurRadius: 28, offset: const Offset(0, 16))],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -263,7 +287,8 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
           backgroundColor: accent,
           disabledBackgroundColor: accent.withOpacity(0.5),
           foregroundColor: bgBase,
-          elevation: 0,
+          elevation: 6,
+          shadowColor: accent.withValues(alpha: 0.25),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(_radiusMd)),
         ).copyWith(
           overlayColor: WidgetStateProperty.all(bgBase.withOpacity(0.06)),
